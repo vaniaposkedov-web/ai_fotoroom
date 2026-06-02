@@ -3530,6 +3530,12 @@ async def on_info_holiday(callback: CallbackQuery, state: FSMContext, db: Databa
 
 
 async def _ask_quality(message_or_callback: Message | CallbackQuery, state: FSMContext, db: Database) -> None:
+    import os
+    if os.getenv("DISABLE_4K") == "1":
+        await state.update_data(selected_quality="1k")
+        await _show_confirmation(message_or_callback, state, db)
+        return
+
     user_id = message_or_callback.from_user.id
     base_price = await db.get_user_generation_price(user_id)
     p4 = await db.get_user_generation_charge_rub(user_id, "4k")

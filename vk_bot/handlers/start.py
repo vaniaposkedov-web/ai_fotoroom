@@ -828,12 +828,14 @@ def _normal_photos_keyboard(count: int, lang: str) -> str:
 
 
 async def _quality_keyboard(db: Database, user_id: int, lang: str) -> str:
+    import os
     price_1k = await db.get_user_generation_price(user_id)
-    price_4k = await db.get_user_generation_charge_rub(user_id, "4k")
     keyboard = Keyboard(one_time=False, inline=False)
     keyboard.add(Text(f"{QUALITY_1K_PREFIX} - {price_1k} RUB"), color=KeyboardButtonColor.PRIMARY)
-    keyboard.row()
-    keyboard.add(Text(f"{QUALITY_4K_PREFIX} - {price_4k} RUB"), color=KeyboardButtonColor.PRIMARY)
+    if os.getenv("DISABLE_4K") != "1":
+        price_4k = await db.get_user_generation_charge_rub(user_id, "4k")
+        keyboard.row()
+        keyboard.add(Text(f"{QUALITY_4K_PREFIX} - {price_4k} RUB"), color=KeyboardButtonColor.PRIMARY)
     keyboard.row()
     keyboard.add(Text(get_string("back", lang)), color=KeyboardButtonColor.NEGATIVE)
     return keyboard.get_json()
@@ -899,10 +901,11 @@ def _is_create_text(text: str, lang: str) -> bool:
 
 
 def _parse_quality_text(text_raw: str | None) -> str | None:
+    import os
     val = (text_raw or "").strip().lower()
     if val.startswith("1k") or val.startswith("1к"):
         return "1k"
-    if val.startswith("4k") or val.startswith("4к"):
+    if (val.startswith("4k") or val.startswith("4к")) and os.getenv("DISABLE_4K") != "1":
         return "4k"
     return None
 

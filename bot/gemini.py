@@ -1172,7 +1172,7 @@ async def generate_image(
                 user_id=zveno_user_id,
             )
 
-            is_4k = str(quality).lower() == "4k"
+            is_4k = str(quality).lower() == "4k" and os.getenv("DISABLE_4K", "0") != "1"
             if is_4k:
                 logger.info("[ZVENO] 4K: локальный OpenCV upscale...")
                 final_image_bytes = _local_upscale_4k(final_image_bytes)
