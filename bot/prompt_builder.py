@@ -112,6 +112,7 @@ async def build_final_prompt(data: dict, db: Database) -> str:
         "infographic_other": "infographic_other_prompt",
         "own": "own_prompt",
         "collage": "collage_prompt",
+        "photostudio_wb": "photostudio_wb_prompt",
     }
 
     prompt_text = ""
@@ -338,6 +339,35 @@ async def build_final_prompt(data: dict, db: Database) -> str:
 
     prompt_filled = ""
     strict_admin_prompt_mode = False
+
+    if category == "photostudio_wb":
+        # Только промпт из админки + подстановка его собственных плейсхолдеров.
+        # Никаких служебных дописок — в модель уходит ровно шаблон + данные + фото.
+        # Общий fill_remaining_brace_placeholders здесь НЕ применяется: он подставил бы
+        # в {category} внутренний ключ "photostudio_wb", а в незаполненные — "none".
+        specs_bits = []
+        if data.get("length"):
+            specs_bits.append(f"length: {data['length']}")
+        if data.get("sleeve"):
+            specs_bits.append(f"sleeve: {data['sleeve']}")
+        if data.get("pants_style"):
+            specs_bits.append(f"cut and fit: {data['pants_style']}")
+        if data.get("photostudio_details"):
+            specs_bits.append(f"client notes: {data['photostudio_details']}")
+        specs = "; ".join(specs_bits) or "not specified — follow the attached product photo"
+
+        quality = str(data.get("selected_quality") or "1k").lower()
+        ps_values = {
+            "{type}": "see the attached product photo",
+            "{category}": "marketplace product listing (Wildberries/Ozon)",
+            "{specs}": specs,
+            "{format}": str(data.get("aspect") or "4:5"),
+            "{resolution}": "4K" if quality == "4k" else "1K",
+        }
+        text = prompt_text
+        for ph, val in ps_values.items():
+            text = text.replace(ph, val)
+        return text.strip()
     if data.get("own_mode") or category == "own":
 
         own_from_admin = (await db.get_app_setting("own_prompt") or "").strip()

@@ -13,7 +13,8 @@ def subscription_check_keyboard(channel_url: str, lang="ru") -> InlineKeyboardMa
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=get_string("subscribe_channel", lang), url=channel_url)],
-            [InlineKeyboardButton(text=get_string("subscribed", lang), callback_data="check_subscription")]
+            [InlineKeyboardButton(text=get_string("subscribed", lang), callback_data="check_subscription")],
+            [InlineKeyboardButton(text=get_string("sub_continue", lang), callback_data="back_main")]
         ]
     )
 
@@ -86,6 +87,9 @@ def marketplace_menu_keyboard(enabled: dict[str, bool], lang="ru") -> InlineKeyb
         rows.append([InlineKeyboardButton(text=get_string("cat_own", lang), callback_data="create_cat:own")])
     if enabled.get("own_variant", True):
         rows.append([InlineKeyboardButton(text=get_string("cat_own_variant", lang), callback_data="create_cat:own_variant")])
+
+
+    rows.append([InlineKeyboardButton(text=get_string("cat_photostudio_wb", lang), callback_data="photostudio_wb")])
     
     rows.append([InlineKeyboardButton(text=get_string("back", lang), callback_data="back_main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

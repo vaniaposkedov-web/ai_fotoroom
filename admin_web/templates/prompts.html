@@ -79,6 +79,13 @@
             <div class="col-12"><button type="submit" class="btn btn-outline-primary btn-sm">Обновить промпт</button></div>
         </form>
 
+        <form action="/prompts/category_prompt/update" method="post" class="row g-2 mb-3">
+            <input type="hidden" name="key" value="photostudio_wb_prompt">
+            <div class="col-12"><label class="form-label">📸 Фотостудия WB/OZON</label></div>
+            <div class="col-12"><textarea name="value" class="form-control" rows="3" placeholder="Базовый промпт профессиональной съёмки под карточку маркетплейса. К нему добавляются выбранные пользователем длина изделия, длина рукава, тип кроя и его свободное описание сцены.">{{ cat_prompts.photostudio_wb_prompt }}</textarea></div>
+            <div class="col-12"><button type="submit" class="btn btn-outline-primary btn-sm">Обновить промпт</button></div>
+        </form>
+
         <hr class="my-4">
         <h6 class="mb-3">🎬 Видеогенерация — 1 фото (photo 1)</h6>
         <div class="small text-muted mb-3">

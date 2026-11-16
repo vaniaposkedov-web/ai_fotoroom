@@ -7,6 +7,25 @@
     </form>
 </div>
 
+<div class="card p-3 mb-4 border-warning">
+    <h6 class="fw-bold mb-1">💰 Стандартная цена 1K для всех</h6>
+    <div class="small text-muted mb-2">
+        Применяется ко всем пользователям, у кого <b>не задана</b> своя (кастомная) цена.
+        Пользователей с индивидуальной ценой <b>не меняет</b>. Сейчас стандарт: <b>{{ standard_price }} ₽</b>.
+    </div>
+    <form action="/users/set_standard_price" method="post"
+          onsubmit="return confirm('Поставить стандартную цену 1K = ' + this.price.value + ' ₽ для всех пользователей без кастомной цены?');"
+          class="row g-2 align-items-end">
+        <div class="col-auto">
+            <label class="small text-muted">Новая стандартная цена (₽)</label>
+            <input type="number" name="price" class="form-control" value="{{ standard_price }}" min="1" required style="max-width:160px;">
+        </div>
+        <div class="col-auto">
+            <button type="submit" class="btn btn-warning">Применить ко всем (кроме кастомных)</button>
+        </div>
+    </form>
+</div>
+
 <div class="row g-3">
     {% for user in users %}
     <div class="col-12 col-md-6">
@@ -29,7 +48,13 @@
                         <input type="number" name="amount" class="form-control" value="{{ user.balance }}" required>
                     </div>
                     <div class="col">
-                        <label class="small text-muted">Цена фото (₽)</label>
+                        <label class="small text-muted">Цена фото (₽)
+                            {% if user.custom_1k_price_rub is not none %}
+                                <span class="badge bg-info">кастомная</span>
+                            {% else %}
+                                <span class="badge bg-secondary">стандарт</span>
+                            {% endif %}
+                        </label>
                         <input type="number" name="price" class="form-control" value="{{ user.generation_price or 25 }}" min="1" required>
                     </div>
                 </div>

@@ -63,7 +63,9 @@ def _build_zveno_image_provider_preferences() -> dict | None:
     provider: dict = {}
     only = _env_csv("ZVENO_IMAGE_PROVIDER_ONLY")
     order = _env_csv("ZVENO_IMAGE_PROVIDER_ORDER")
-    ignore = _env_csv("ZVENO_IMAGE_PROVIDER_IGNORE", "google-ai-studio")
+    # Раньше дефолт был google-ai-studio — из‑за этого 502 на gemini-3.1-flash-image-preview
+    # (у preview единственный endpoint как раз google-ai-studio). Ignore только если явно задан в env.
+    ignore = _env_csv("ZVENO_IMAGE_PROVIDER_IGNORE", "")
     if only:
         provider["only"] = only
     if order:
@@ -444,7 +446,11 @@ def _pick_zveno_image_model(model_name: str | None, generation_meta: dict | None
     # Явно заданная модель имеет приоритет.
     if (model_name or "").strip():
         return _resolve_zveno_image_model(model_name)
-    # Единая модель для всех качеств (1K и 4K).
+    if str(quality).lower() == "4k":
+        # Все 4K → nano banana pro (детальная модель). Нативный 4K (3712×4608)
+        # обеспечивает image_size="4K" + чтение последнего кадра из ответа.
+        pro = (os.getenv("ZVENO_IMAGE_MODEL_PRO") or "google/gemini-3-pro-image-preview").strip()
+        return _resolve_zveno_image_model(pro)
     model = os.getenv("ZVENO_IMAGE_MODEL_CHEAP") or "google/gemini-3.1-flash-image-preview"
     return _resolve_zveno_image_model(model)
 
@@ -616,9 +622,13 @@ def _zveno_extract_image_ref(data: dict) -> str | None:
     msg = (choices[0] or {}).get("message") or {}
     imgs = msg.get("images")
     if isinstance(imgs, list) and imgs:
-        el = imgs[0]
+        # Gemini отдаёт промежуточные кадры рендера, а финал в полном разрешении — ПОСЛЕДНИЙ.
+        # Для 1K приходит одна картинка, так что imgs[-1] == imgs[0] — поведение не меняется.
+        el = imgs[-1]
         if isinstance(el, dict):
             u = el.get("url") or el.get("image_url")
+            if isinstance(u, dict):
+                u = u.get("url")
             if u:
                 return str(u)
             b64 = el.get("b64_json")
@@ -774,6 +784,7 @@ async def _zveno_image_chat_request(
     mime_type: str,
     aspect_ratio: str,
     image_labels: list[str] | None = None,
+    image_size: str | None = None,
 ) -> tuple[bytes, dict]:
     endpoint = (os.getenv("ZVENO_BASE_URL") or "https://api.zveno.ai/v1").rstrip("/") + "/chat/completions"
     timeout_sec = max(45, _env_int("ZVENO_IMAGE_TIMEOUT_SECONDS", 60))
@@ -795,12 +806,16 @@ async def _zveno_image_chat_request(
     else:
         response_modalities = ["image"]
 
+    image_config: dict = {"aspect_ratio": ar}
+    if image_size:
+        # Нативный размер модели (напр. "4K"). Финал приходит последним кадром в images.
+        image_config["image_size"] = image_size
     payload: dict = {
         "model": model,
         "messages": [{"role": "user", "content": parts}],
         "modalities": response_modalities,
         "max_completion_tokens": max(2048, _env_int("ZVENO_IMAGE_MAX_COMPLETION_TOKENS", 8192)),
-        "image_config": {"aspect_ratio": ar},
+        "image_config": image_config,
     }
     provider_preferences = _build_zveno_image_provider_preferences()
     if provider_preferences:
@@ -1039,8 +1054,14 @@ def _local_upscale_4k(image_bytes: bytes) -> bytes:
         upscaled = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
         # Кодируем результат
-        encode_params = [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality, cv2.IMWRITE_JPEG_OPTIMIZE, 1]
-        success, buf = cv2.imencode(".jpg", upscaled, encode_params)
+        # PNG, а не JPEG: апскейл и без того интерполирует, добавлять поверх
+        # JPEG-артефакты нельзя. Признак ошибки — файл ~1.8–2.5 МБ вместо 10–20 МБ.
+        # ZVENO_4K_JPEG_QUALITY оставлен для отката на JPEG через ZVENO_4K_FORMAT=jpeg.
+        if (os.getenv("ZVENO_4K_FORMAT") or "png").lower() == "jpeg":
+            encode_params = [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality, cv2.IMWRITE_JPEG_OPTIMIZE, 1]
+            success, buf = cv2.imencode(".jpg", upscaled, encode_params)
+        else:
+            success, buf = cv2.imencode(".png", upscaled, [cv2.IMWRITE_PNG_COMPRESSION, 6])
         if not success:
             logger.warning("[LOCAL_UPSCALE] cv2.imencode не удалось")
             return _ensure_4k_resolution(image_bytes)
@@ -1132,6 +1153,7 @@ async def generate_image(
                 final_image_bytes, z_data = await _zveno_image_chat_request(
                     session, z_key, image_model, full_user_text, images, mime_type, asp,
                     image_labels=img_labels,
+                    image_size=("4K" if str(quality).lower() == "4k" else None),
                 )
             except Exception as first_exc:
                 first_err = str(first_exc or "")
@@ -1172,9 +1194,12 @@ async def generate_image(
                 user_id=zveno_user_id,
             )
 
-            is_4k = str(quality).lower() == "4k" and os.getenv("DISABLE_4K", "0") != "1"
+            # 4K включается только если UI/хендлеры передали quality=="4k".
+            # Глобальный запрет (app_settings.disable_4k) форсит 1k ещё до вызова generate_image.
+            is_4k = str(quality).lower() == "4k"
             if is_4k:
-                logger.info("[ZVENO] 4K: локальный OpenCV upscale...")
+                logger.info("[ZVENO] 4K: локальный upscale до %spx по длинной стороне...",
+                            _env_int("ZVENO_4K_LONG_SIDE", 3840))
                 final_image_bytes = _local_upscale_4k(final_image_bytes)
 
             if generation_meta is not None:
@@ -1182,7 +1207,9 @@ async def generate_image(
                 generation_meta["upscaled"] = is_4k
 
             os.makedirs(os.path.join(BASE_DIR, "data", "history"), exist_ok=True)
-            file_name = f"result_{uuid.uuid4().hex}.jpg"
+            # 4K-апскейл отдаёт PNG — расширение определяем по сигнатуре файла
+            _ext = "png" if final_image_bytes[:8] == b"\x89PNG\r\n\x1a\n" else "jpg"
+            file_name = f"result_{uuid.uuid4().hex}.{_ext}"
             file_path = os.path.join(BASE_DIR, "data", "history", file_name)
             with open(file_path, "wb") as f:
                 f.write(final_image_bytes)

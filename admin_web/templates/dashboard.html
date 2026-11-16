@@ -79,6 +79,24 @@
             </form>
         </div>
     </div>
+
+    <div class="col-12 col-md-6 mt-3 text-start">
+        <div class="card p-3 h-100 shadow-sm border-warning border-2">
+            <div class="text-muted small fw-bold text-uppercase mb-2">Генерация 4K (только фото)</div>
+            <div class="small text-muted mb-2">
+                {% if disable_4k %}
+                    4K скрыт у пользователей: кнопки нет, клики по старым сообщениям и «Повторить» идут в 1K. Видео не затрагивается.
+                {% else %}
+                    4K доступен в ботах (Telegram / VK), включая фотостудию. Видео не затрагивается.
+                {% endif %}
+            </div>
+            <form action="/settings/disable_4k/toggle" method="post" class="mt-1">
+                <button type="submit" class="btn {% if disable_4k %}btn-warning{% else %}btn-success{% endif %} w-100">
+                    {% if disable_4k %}4K ВЫКЛЮЧЕН (Включить){% else %}4K ВКЛЮЧЕН (Выключить){% endif %}
+                </button>
+            </form>
+        </div>
+    </div>
 </div>
 
 <div class="row mt-4">

@@ -570,6 +570,24 @@ async def _show_confirmation(message_or_callback: Message | CallbackQuery, state
         for step in steps:
             s_id, s_key, s_question, s_type, s_optional, s_order = step
             val = data.get(s_key)
+
+            if category_key == PHOTOSTUDIO_CAT_KEY:
+                title = PHOTOSTUDIO_STEP_LABELS.get(s_key) or s_question.split("\n")[0].split(":")[0].strip()
+                if not val and s_key == "photo":
+                    # После «Повторить» новое фото приходит в user_photo_id
+                    val = data.get("user_photo_id")
+                if not val:
+                    parts.append(f"🔹 **{title}**: — пропущено\n")
+                    continue
+                label = data.get(f"{s_key}_label", val)
+                if s_type == "photo" or (isinstance(label, str) and label.startswith(("AgAC", "AQAD"))):
+                    label = "Фото получено"
+                label = str(label)
+                if len(label) > 120:
+                    label = label[:120].rstrip() + "…"
+                parts.append(f"🔹 **{title}**: {label}\n")
+                continue
+
             if val:
 
                 label = data.get(f"{s_key}_label", val)
@@ -588,7 +606,9 @@ async def _show_confirmation(message_or_callback: Message | CallbackQuery, state
         parts.append(f"📝 **Промпт**: {data.get('prompt', '—')}\n")
         parts.append(f"🖼 **Формат фото**: {data.get('aspect', '1:1')}\n")
 
-    quality_choice = data.get("selected_quality", "1k")
+    quality_choice = await db.resolve_photo_quality(data.get("selected_quality", "1k"))
+    if data.get("selected_quality") != quality_choice:
+        await state.update_data(selected_quality=quality_choice)
     if quality_choice == "4k":
         parts.append("💎 **Качество**: 4K (Ультра)\n")
     else:
@@ -882,31 +902,11 @@ async def _show_next_step(message_or_callback: Message | CallbackQuery, state: F
 @router.callback_query(F.data == "menu_support")
 async def on_menu_support(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
     lang = await db.get_user_language(callback.from_user.id)
-    await state.set_state(CreateForm.waiting_support_message)
-
-    chat_history = await db.get_support_chat(callback.from_user.id)
-    history_text = ""
-    if chat_history:
-        history_text = "\n\n<b>Последние сообщения:</b>\n"
-        for _, text, is_admin, _, _, f_id, f_type in chat_history[-5:]:
-            prefix = "👤 Вы: " if not is_admin else "👨‍💻 Поддержка: "
-            if f_type == 'text':
-                content = text
-            elif f_type == 'photo':
-                content = "🖼 Фото"
-            elif f_type == 'video':
-                content = "🎥 Видео"
-            else:
-                content = "📎 Файл"
-            history_text += f"{prefix}{content}\n"
-
-    text = (
-        "👋 Добро пожаловать в тех.поддержку!\n\n"
-        "Опишите вашу проблему или отправьте фото/видео прямо здесь. "
-        "Администратор ответит вам в ближайшее время."
-        f"{history_text}"
+    await _replace_with_text(
+        callback,
+        get_string("support_contact_message", lang),
+        reply_markup=back_main_keyboard(lang),
     )
-    await _replace_with_text(callback, text, reply_markup=back_main_keyboard(lang))
     await _safe_answer(callback)
 
 
@@ -1104,7 +1104,9 @@ async def on_dynamic_input(message: Message, state: FSMContext, db: Database) ->
 
         if target_key:
             low_key = target_key.lower()
-            if any(x in low_key for x in ("adv_", "преимущество")):
+            if low_key == PHOTOSTUDIO_FREEFORM_STEP:
+                max_len = TELEGRAM_TEXT_LIMIT
+            elif any(x in low_key for x in ("adv_", "преимущество")):
                 max_len = 100
             elif any(x in low_key for x in ("extra_info", "доп_текст")):
                 max_len = 80
@@ -1116,6 +1118,10 @@ async def on_dynamic_input(message: Message, state: FSMContext, db: Database) ->
             await message.answer(
                 f"⚠️ Текст слишком длинный ({text_len}/{max_len} симв.). Пожалуйста, сократите до {max_len} символов.")
             return
+
+        if max_len == TELEGRAM_TEXT_LIMIT and text_len >= TELEGRAM_TEXT_LIMIT - 96:
+            lang = await db.get_user_language(message.from_user.id)
+            await message.answer(get_string("photostudio_text_maybe_cut", lang))
 
     if data.get("waiting_custom_for"):
         step_key = data.get("waiting_custom_for")
@@ -1226,6 +1232,42 @@ async def on_marketplace_menu(callback: CallbackQuery, db: Database) -> None:
     from bot.keyboards import marketplace_menu_keyboard
     await _replace_with_text(callback, get_string("marketplace_menu", lang),
                              reply_markup=marketplace_menu_keyboard(statuses, lang))
+    await _safe_answer(callback)
+
+
+PHOTOSTUDIO_CAT_KEY = "photostudio_wb"
+PHOTOSTUDIO_FREEFORM_STEP = "photostudio_details"
+TELEGRAM_TEXT_LIMIT = 4096
+
+# Короткие подписи для экрана подтверждения — иначе туда печатается весь текст вопроса
+PHOTOSTUDIO_STEP_LABELS = {
+    "photo": "Фото товара",
+    "length": "Длина изделия",
+    "sleeve": "Длина рукава",
+    "pants_style": "Тип кроя",
+    "photostudio_details": "Доп. информация",
+}
+
+
+@router.callback_query(F.data == "photostudio_wb")
+async def on_photostudio_wb(callback: CallbackQuery, db: Database, state: FSMContext) -> None:
+    lang = await db.get_user_language(callback.from_user.id)
+
+    category_db = await db.get_category_by_key(PHOTOSTUDIO_CAT_KEY)
+    steps = await db.list_steps(category_db[0]) if category_db else []
+
+    if not steps:
+        await _replace_with_text(callback, get_string("photostudio_wb_dev", lang),
+                                 reply_markup=back_main_keyboard(lang))
+        await _safe_answer(callback)
+        return
+
+    await state.clear()
+    await state.update_data(category=PHOTOSTUDIO_CAT_KEY)
+    reset_payload = {s[1]: None for s in steps}
+    reset_payload["current_step_index"] = 0
+    await state.update_data(**reset_payload)
+    await _show_next_step(callback, state, db)
     await _safe_answer(callback)
 
 
@@ -3530,8 +3572,8 @@ async def on_info_holiday(callback: CallbackQuery, state: FSMContext, db: Databa
 
 
 async def _ask_quality(message_or_callback: Message | CallbackQuery, state: FSMContext, db: Database) -> None:
-    import os
-    if os.getenv("DISABLE_4K") == "1":
+    # При глобальном запрете 4K (включая фотостудию) сразу идём в подтверждение с 1K.
+    if await db.is_4k_disabled():
         await state.update_data(selected_quality="1k")
         await _show_confirmation(message_or_callback, state, db)
         return
@@ -3555,6 +3597,8 @@ async def _ask_quality(message_or_callback: Message | CallbackQuery, state: FSMC
 @router.callback_query(F.data.startswith("gen_qual_pre:"))
 async def process_quality_choice_pre(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
     quality_choice = callback.data.split(":")[1]
+    if quality_choice == "4k" and await db.is_4k_disabled():
+        quality_choice = "1k"
     await state.update_data(selected_quality=quality_choice)
     # После выбора качества показываем финальное окно
     await _show_confirmation(callback, state, db)
@@ -3628,7 +3672,10 @@ async def _do_generate_real(message_or_callback: Message | CallbackQuery, state:
         return
 
     balance = await db.get_user_balance(user_id)
-    quality_choice = data.get("selected_quality", "1k")
+    quality_choice = await db.resolve_photo_quality(data.get("selected_quality", "1k"))
+    if data.get("selected_quality") != quality_choice:
+        await state.update_data(selected_quality=quality_choice)
+        data = await state.get_data()
     total_price = await db.get_user_generation_charge_rub(user_id, quality_choice)
 
     if balance < total_price:
@@ -3640,7 +3687,7 @@ async def _do_generate_real(message_or_callback: Message | CallbackQuery, state:
         return
 
     try:
-        quality_choice = data.get("selected_quality", "1k")
+        quality_choice = await db.resolve_photo_quality(data.get("selected_quality", "1k"))
         quality = '4k' if quality_choice == '4k' else 'HD'
 
         if not data:
@@ -3658,7 +3705,16 @@ async def _do_generate_real(message_or_callback: Message | CallbackQuery, state:
 
         # Не дописываем лишний текст к промпту — используем только то что из админки.
 
-        process_msg = await ans_obj.answer("🎨 ⚡️ ⏳")
+        process_msg = None
+        if category == PHOTOSTUDIO_CAT_KEY and isinstance(message_or_callback, CallbackQuery):
+            # Экран подтверждения превращаем в прогресс, а не плодим новое сообщение
+            try:
+                await ans_obj.edit_text("🎨 ⚡️ ⏳")
+                process_msg = ans_obj
+            except Exception:
+                process_msg = None
+        if process_msg is None:
+            process_msg = await ans_obj.answer("🎨 ⚡️ ⏳")
 
         gen_done = asyncio.Event()
 
@@ -3695,6 +3751,8 @@ async def _do_generate_real(message_or_callback: Message | CallbackQuery, state:
                         f"Результат вас приятно удивит"
                     )
                     try:
+                        if process_msg is None:
+                            break
                         await process_msg.edit_text(text)
                     except Exception:
                         pass
@@ -3705,10 +3763,11 @@ async def _do_generate_real(message_or_callback: Message | CallbackQuery, state:
                         pass
                 elapsed = time.time() - start_time
                 try:
-                    await process_msg.edit_text(
-                        f"🚀 Генерация\n\n{steps_text[-1]}\n\n{'🟦' * 10} 100%\n\n"
-                        f"Прошло: {int(elapsed)}с\n\nГотово…"
-                    )
+                    if process_msg is not None:
+                        await process_msg.edit_text(
+                            f"🚀 Генерация\n\n{steps_text[-1]}\n\n{'🟦' * 10} 100%\n\n"
+                            f"Прошло: {int(elapsed)}с\n\nГотово…"
+                        )
                 except Exception:
                     pass
             except asyncio.CancelledError:
@@ -3775,6 +3834,14 @@ async def _do_generate_real(message_or_callback: Message | CallbackQuery, state:
 
                         await state.update_data(result_photo_id=db_result_path)
 
+                        if category == PHOTOSTUDIO_CAT_KEY and process_msg is not None:
+                            # Карточка встаёт на место прогресса, а не под ним
+                            try:
+                                await process_msg.delete()
+                            except Exception:
+                                pass
+                            process_msg = None
+
                         await ans_obj.answer_document(
                             document=FSInputFile(result_path),
                             caption=get_string("gen_success", lang),
@@ -3808,7 +3875,8 @@ async def _do_generate_real(message_or_callback: Message | CallbackQuery, state:
                         )
 
                         try:
-                            await process_msg.delete()
+                            if process_msg is not None:
+                                await process_msg.delete()
                         except:
                             pass
                         if isinstance(message_or_callback, CallbackQuery): await _safe_answer(message_or_callback)
@@ -3830,7 +3898,8 @@ async def _do_generate_real(message_or_callback: Message | CallbackQuery, state:
             except (asyncio.CancelledError, Exception):
                 pass
         try:
-            await process_msg.delete()
+            if process_msg is not None:
+                await process_msg.delete()
         except:
             pass
 
@@ -4023,7 +4092,10 @@ async def on_result_edit_text_real(message: Message, state: FSMContext, db: Data
 
     balance = await db.get_user_balance(user_id)
 
-    quality_choice = data.get("selected_quality", "1k")
+    quality_choice = await db.resolve_photo_quality(data.get("selected_quality", "1k"))
+    if data.get("selected_quality") != quality_choice:
+        await state.update_data(selected_quality=quality_choice)
+        data = await state.get_data()
     total_price = await db.get_user_generation_charge_rub(user_id, quality_choice)
 
     if balance < total_price:
@@ -4036,7 +4108,7 @@ async def on_result_edit_text_real(message: Message, state: FSMContext, db: Data
     base_prompt = await _build_final_prompt(data, db)
     prompt_filled = f"{base_prompt}\n\nПравки: {edit_text}"
 
-    quality_choice = data.get("selected_quality", "1k")
+    quality_choice = await db.resolve_photo_quality(data.get("selected_quality", "1k"))
     quality = '4k' if quality_choice == '4k' else 'HD'
 
     input_photos, _ = await _collect_input_photos(data, category, db)
@@ -4205,20 +4277,9 @@ async def on_result_edit_text_real(message: Message, state: FSMContext, db: Data
             if used_project_id:
                 await db.increment_gcp_usage(used_project_id)
 
-            await db.record_api_usage(kid_used)
-            try:
-                await db.set_app_setting("last_success_api_key_id", str(kid_used))
-            except Exception:
-                pass
-
             await db.subtract_user_balance(user_id, total_price)
 
             await db.update_daily_usage(user_id)
-
-            from bot.keyboards import result_actions_keyboard, result_actions_own_keyboard
-            kb = result_actions_keyboard(lang)
-            if category == "own_variant" or data.get("own_mode"):
-                kb = result_actions_own_keyboard(lang)
 
             pid = await db.generate_pid()
             history_dir = os.path.join("data", "history")
@@ -4255,13 +4316,27 @@ async def on_result_edit_text_real(message: Message, state: FSMContext, db: Data
             except Exception as e:
                 logger.error(f"Error downloading images for history in edit: {e}")
 
-            result_url = _public_url_for(db_result_path)
-            kb_with_download = _result_keyboard_with_download(kb, result_url)
+            from bot.keyboards import result_actions_keyboard, result_actions_own_keyboard
+            file_name = os.path.basename(db_result_path)
+            if category == "own_variant" or data.get("own_mode"):
+                kb = result_actions_own_keyboard(lang, file_name=file_name)
+            else:
+                kb = result_actions_keyboard(lang, file_name=file_name)
 
-            await message.answer(
-                text=f"✅ Правки применены!\n\nТекст правок: {edit_text}",
-                reply_markup=kb_with_download,
+            caption = f"✅ Правки применены!\n\nТекст правок: {edit_text}"
+            if len(caption) > 1000:
+                caption = caption[:1000] + "…"
+            send_src = local_result_path if os.path.exists(local_result_path) else (
+                result_path if result_path and os.path.exists(str(result_path)) else None
             )
+            if send_src:
+                await message.answer_document(
+                    document=FSInputFile(send_src),
+                    caption=caption,
+                    reply_markup=kb,
+                )
+            else:
+                await message.answer(text=caption, reply_markup=kb)
 
             await db.add_generation_history(
                 pid=pid,
@@ -4809,6 +4884,39 @@ async def on_video_confirm(callback: CallbackQuery, state: FSMContext, db: Datab
         await _on_video_confirm_real(callback, state, db, bot)
 
 
+async def _notify_admins_video_error(db: Database, bot: Bot, user_id: int, err: str) -> None:
+    """Throttled admin alert for video failures that need operator action (e.g. provider out of funds)."""
+    try:
+        cooldown_s = 300
+        now_ts = int(time.time())
+        try:
+            last_ts = int(str(await db.get_app_setting("tg_video_error_notify_last_ts", "0") or "0").strip() or "0")
+        except Exception:
+            last_ts = 0
+        if now_ts - last_ts < cooldown_s:
+            return
+        try:
+            await db.set_app_setting("tg_video_error_notify_last_ts", str(now_ts))
+        except Exception:
+            pass
+        settings = load_settings()
+        admin_ids = settings.admin_ids or [1440716472, 916948327]
+        short = (err or "").strip()[:600]
+        text = (
+            "⚠️ Видео: провайдер отклонил генерацию\n"
+            f"User: {user_id}\n"
+            "Похоже, у провайдера видео недостаточно средств — пополните баланс.\n"
+            f"Error: {short}"
+        )
+        for aid in admin_ids:
+            try:
+                await bot.send_message(chat_id=int(aid), text=text)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 async def _on_video_confirm_real(callback: CallbackQuery, state: FSMContext, db: Database, bot: Bot) -> None:
     lang = await db.get_user_language(callback.from_user.id)
     user_id = callback.from_user.id
@@ -4934,8 +5042,11 @@ async def _on_video_confirm_real(callback: CallbackQuery, state: FSMContext, db:
             "rate_limit": "video_err_rate_limit",
             "timeout": "video_err_timeout",
             "safety": "video_err_safety",
+            "insufficient_funds": "video_err_unavailable",
         }.get(exc.category, "video_failed")
         await progress_msg.edit_text(get_string(err_key, lang))
+        if exc.category == "insufficient_funds":
+            await _notify_admins_video_error(db, bot, user_id, str(exc))
     except Exception as exc:
         logger.error("[VIDEO] unexpected error user=%s: %s", user_id, exc, exc_info=True)
         await progress_msg.edit_text(get_string("video_failed", lang))

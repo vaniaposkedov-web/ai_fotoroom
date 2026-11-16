@@ -400,9 +400,12 @@ class Database:
         await self._seed_prompts()
         await self._seed_templates()
         await self._seed_subscription_plans()
-        await self._seed_app_settings() 
-        await self._seed_categories() 
-        await self._seed_library() 
+        await self._seed_app_settings()
+        await self._seed_categories()
+        await self._seed_library()
+        # Idempotent: ensures the «Коллаж» clothing-attribute steps exist on new AND existing
+        # databases (add_* skip anything already present), so live clients are not disturbed.
+        await self.ensure_collage_steps()
 
         
         async with aiosqlite.connect(self._db_path) as db:
@@ -510,6 +513,26 @@ class Database:
                 row = await cur.fetchone()
                 return (str(row[0]) == '1') if row else False
 
+    async def is_4k_disabled(self) -> bool:
+        """Глобальный запрет 4K для фото-генераций (видео не затрагивается)."""
+        val = await self.get_app_setting("disable_4k")
+        if val is None:
+            import os
+            env_disabled = os.getenv("DISABLE_4K", "0").strip() == "1"
+            await self.set_app_setting("disable_4k", "1" if env_disabled else "0")
+            return env_disabled
+        return str(val).strip() == "1"
+
+    async def set_4k_disabled(self, disabled: bool) -> None:
+        await self.set_app_setting("disable_4k", "1" if disabled else "0")
+
+    async def resolve_photo_quality(self, quality: str | None) -> str:
+        """Нормализует качество фото: при выключенном 4K всегда возвращает 1k."""
+        q = (quality or "1k").strip().lower()
+        if q == "4k" and await self.is_4k_disabled():
+            return "1k"
+        return "4k" if q == "4k" else "1k"
+
     async def set_maintenance(self, enabled: bool) -> None:
         async with aiosqlite.connect(self._db_path) as db:
             
@@ -570,13 +593,15 @@ class Database:
                 return [(str(r[0]), str(r[1]), r[2]) for r in rows]
 
     async def _seed_app_settings(self) -> None:
-        
+        import os
+        disable_4k_default = "1" if os.getenv("DISABLE_4K", "0").strip() == "1" else "0"
         settings = [
             ("required_channel_id", ""), 
             ("required_channel_url", "https://t.me/bnbslow"),
             ("required_vk_group_id", ""),
             ("required_vk_group_url", ""),
             ("agreement_text", "Пожалуйста, ознакомьтесь и примите условия пользовательского соглашения перед использованием бота."),
+            ("disable_4k", disable_4k_default),
         ]
         async with aiosqlite.connect(self._db_path) as db:
             for key, val in settings:
@@ -973,17 +998,51 @@ class Database:
                 return int(row[0]) if row else 0
 
     async def get_user_generation_price(self, user_id: int) -> int:
-        """Стоимость 1K для пользователя: базово 30 ₽, иначе custom_1k_price_rub из админки."""
+        """Стоимость 1K: индивидуальная цена пользователя (custom_1k_price_rub), а если её нет —
+        общий стандарт из app_settings['standard_1k_price_rub'] (фолбэк DEFAULT_USER_TARIFF_1K_RUB).
+        Смена общего стандарта меняет цену только у пользователей БЕЗ своей (кастомной) цены."""
         async with aiosqlite.connect(self._db_path) as db:
             async with db.execute(
                 "SELECT custom_1k_price_rub FROM users WHERE id=?", (user_id,)
             ) as cur:
                 row = await cur.fetchone()
-        if not row:
-            return DEFAULT_USER_TARIFF_1K_RUB
-        if row[0] is not None:
-            return max(1, int(row[0]))
+            if row and row[0] is not None:
+                return max(1, int(row[0]))
+            async with db.execute(
+                "SELECT value FROM app_settings WHERE key='standard_1k_price_rub'"
+            ) as cur:
+                srow = await cur.fetchone()
+        if srow and srow[0] is not None:
+            try:
+                return max(1, int(srow[0]))
+            except (ValueError, TypeError):
+                pass
         return DEFAULT_USER_TARIFF_1K_RUB
+
+    async def get_standard_1k_price(self) -> int:
+        """Текущий общий стандарт цены 1K (для пользователей без кастомной цены)."""
+        val = await self.get_app_setting("standard_1k_price_rub")
+        if val is not None:
+            try:
+                return max(1, int(val))
+            except (ValueError, TypeError):
+                pass
+        return DEFAULT_USER_TARIFF_1K_RUB
+
+    async def set_standard_1k_price(self, price: int) -> int:
+        """Меняет общий стандарт 1K для ВСЕХ пользователей БЕЗ кастомной цены.
+        Пользователи с заданным custom_1k_price_rub НЕ затрагиваются. Возвращает применённую цену."""
+        p = max(1, int(price))
+        await self.set_app_setting("standard_1k_price_rub", str(p))
+
+        async def _write(db: aiosqlite.Connection):
+            # Синхроним легаси-колонку (для отображения) только у стандартных пользователей.
+            await db.execute(
+                "UPDATE users SET generation_price = ? WHERE custom_1k_price_rub IS NULL",
+                (p,),
+            )
+        await self._run_write(_write, op_name="set_standard_1k_price")
+        return p
 
     async def get_user_generation_charge_rub(self, user_id: int, quality: str) -> int:
         """Списание с баланса пользователя: 4K = 50 ₽; 1K = тариф выше."""
@@ -1529,6 +1588,52 @@ class Database:
                 (step_id, text, value, order_index, custom_prompt)
             )
             await db.commit()
+
+    async def ensure_collage_steps(self) -> None:
+        """Add the clothing-attribute steps (sleeve → pants cut → length) to the «Коллаж»
+        category, AFTER the 3 photo steps and BEFORE the quality choice.
+
+        Fully idempotent (add_category/add_step/add_step_option skip anything already present),
+        so it is safe to run on every startup and on live databases with existing clients.
+        Selections are saved into state data (data['sleeve'] / data['pants_style'] /
+        data['length']) and are wired to existing prompt placeholders, but the collage prompt,
+        model and quality are NOT changed — the values stay dormant until the placeholders are
+        added to the prompt later. is_optional=1 makes the engine auto-add «Пропустить»/«Назад».
+        """
+        cat_id = await self.add_category("collage", "🖼️ Коллаж", order_index=1)
+
+        # Base photo steps (idempotent: left untouched if the category already has them on a
+        # live DB; created here if the collage category is absent, e.g. on an older database).
+        await self.add_step(cat_id, "collage_model_photo", "📸 Пришлите фото модели (любая модель клиента):", "photo", order_index=1)
+        await self.add_step(cat_id, "collage_front_photo", "📸 Пришлите фото изделия СПЕРЕДИ:", "photo", order_index=2)
+        await self.add_step(cat_id, "collage_back_photo", "📸 Пришлите фото изделия СЗАДИ:", "photo", order_index=3)
+
+        # 🧥 Тип рукавов (order 4 — right after the 3 photo steps 1–3)
+        s_sleeve = await self.add_step(cat_id, "sleeve", "🧥 Тип рукавов:", "buttons", is_optional=1, order_index=4)
+        for i, (text, value) in enumerate([
+            ("Обычный", "Обычный"), ("Короткий", "Короткий"), ("Длинный", "Длинный"),
+            ("Без рукавов", "Без рукавов"), ("Три четверти", "Три четверти"), ("До локтя", "До локтя"),
+        ], start=1):
+            await self.add_step_option(s_sleeve, text, value, i)
+        await self.add_step_option(s_sleeve, "Свой вариант", "custom", 7, "Введите ваш вариант рукавов:")
+
+        # 👖 Тип кроя штанов (order 5)
+        s_pants = await self.add_step(cat_id, "pants_style", "👖 Выберите тип кроя штанов:", "buttons", is_optional=1, order_index=5)
+        for i, (text, value) in enumerate([
+            ("Свободный", "Свободный"), ("Зауженный", "Зауженный"), ("На манжете", "На манжете"),
+        ], start=1):
+            await self.add_step_option(s_pants, text, value, i)
+        await self.add_step_option(s_pants, "Свой вариант", "custom", 4, "Введите ваш вариант кроя штанов:")
+
+        # 📏 Длина изделия (order 6 — last before quality)
+        s_len = await self.add_step(cat_id, "length", "📏 Выберите длину изделия:", "buttons", is_optional=1, order_index=6)
+        for i, (text, value) in enumerate([
+            ("Ниже пояса", "Ниже пояса"), ("Туника", "Туника"), ("Короткий топ", "Короткий топ"),
+            ("Обычный топ", "Обычный топ"), ("До талии", "До талии"), ("До колен", "До колен"),
+            ("Миди", "Миди"), ("В пол", "В пол"), ("До бедер", "До бедер"),
+        ], start=1):
+            await self.add_step_option(s_len, text, value, i)
+        await self.add_step_option(s_len, "Свой вариант", "custom", 10, "Введите длину изделия текстом:")
 
     async def delete_category(self, cat_id: int) -> None:
         async with aiosqlite.connect(self._db_path) as db:

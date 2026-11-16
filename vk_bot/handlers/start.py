@@ -328,30 +328,25 @@ async def _delete_vk_message(message: Message, msg_id: int) -> None:
         pass
 
 
-async def _upload_result_photo_attachment(message: Message, file_path: str) -> str | None:
-    
+async def _upload_photo_via_messages(message: Message, data: bytes, filename: str) -> str | None:
+    """Legacy photos.getMessagesUploadServer + saveMessagesPhoto flow.
+
+    Note: VK migrated this app's messages-photo upload to the new
+    pu.vk.ru/gu/photo/v2/bulk_upload endpoint, whose response can no longer be
+    persisted via saveMessagesPhoto. This helper therefore returns None in
+    practice today, but is kept so photo attachments resume automatically if VK
+    restores the legacy behaviour. Callers fall back to _upload_doc_attachment.
+    """
     try:
-        import os
-
-        if not file_path:
+        if not data:
             return None
-        p = file_path
-        if not os.path.isabs(p):
-            p = os.path.join("/app", str(file_path).lstrip("/"))
-        if not os.path.exists(p):
-            return None
-
         server = await message.ctx_api.photos.get_messages_upload_server(peer_id=message.peer_id)
         upload_url = getattr(server, "upload_url", None) or (server.get("upload_url") if isinstance(server, dict) else None)
         if not upload_url:
             return None
-
-        with open(p, "rb") as f:
-            data = f.read()
-
         timeout = httpx.Timeout(connect=20.0, read=60.0, write=60.0, pool=20.0)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            resp = await client.post(upload_url, files={"photo": ("result.jpg", data, "image/jpeg")})
+            resp = await client.post(upload_url, files={"photo": (filename, data, "image/jpeg")})
         if resp.status_code != 200:
             return None
         up = resp.json()
@@ -360,7 +355,6 @@ async def _upload_result_photo_attachment(message: Message, file_path: str) -> s
         h = up.get("hash")
         if not (photo and server_id and h):
             return None
-
         saved = await message.ctx_api.photos.save_messages_photo(photo=photo, server=server_id, hash=h)
         if not saved:
             return None
@@ -374,42 +368,85 @@ async def _upload_result_photo_attachment(message: Message, file_path: str) -> s
             return f"photo{owner_id}_{pid}_{access_key}"
         return f"photo{owner_id}_{pid}"
     except Exception:
-        logger.exception("VK upload result photo failed")
+        # Non-fatal: caller falls back to the document upload path.
+        logger.debug("VK messages-photo upload unavailable, will fall back to doc", exc_info=True)
         return None
 
 
-async def _upload_photo_bytes_attachment(message: Message, photo_bytes: bytes) -> str | None:
-    
+async def _upload_doc_attachment(message: Message, data: bytes, filename: str = "result.jpg") -> str | None:
+    """Upload an image via the still-working legacy document endpoint.
+
+    docs.getMessagesUploadServer/docs.save are unaffected by the photo-upload
+    migration, so this reliably delivers the image (VK renders image documents
+    with an inline preview). Returns a ``doc{owner}_{id}`` attachment string.
+    """
     try:
-        if not photo_bytes:
+        if not data:
             return None
-        server = await message.ctx_api.photos.get_messages_upload_server(peer_id=message.peer_id)
+        server = await message.ctx_api.docs.get_messages_upload_server(peer_id=message.peer_id, type="doc")
         upload_url = getattr(server, "upload_url", None) or (server.get("upload_url") if isinstance(server, dict) else None)
         if not upload_url:
             return None
         timeout = httpx.Timeout(connect=20.0, read=60.0, write=60.0, pool=20.0)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            resp = await client.post(upload_url, files={"photo": ("model.jpg", photo_bytes, "image/jpeg")})
+            resp = await client.post(upload_url, files={"file": (filename, data, "image/jpeg")})
         if resp.status_code != 200:
             return None
         up = resp.json()
-        photo = up.get("photo")
-        server_id = up.get("server")
-        h = up.get("hash")
-        if not (photo and server_id and h):
+        file_token = up.get("file")
+        if not file_token:
             return None
-        saved = await message.ctx_api.photos.save_messages_photo(photo=photo, server=server_id, hash=h)
-        if not saved:
+        saved = await message.ctx_api.docs.save(file=file_token, title=filename)
+        doc = getattr(saved, "doc", None)
+        if doc is None and isinstance(saved, dict):
+            doc = saved.get("doc")
+        if doc is None:
             return None
-        item = saved[0]
-        owner_id = getattr(item, "owner_id", None) or (item.get("owner_id") if isinstance(item, dict) else None)
-        pid = getattr(item, "id", None) or (item.get("id") if isinstance(item, dict) else None)
-        access_key = getattr(item, "access_key", None) or (item.get("access_key") if isinstance(item, dict) else None)
-        if owner_id is None or pid is None:
+        owner_id = getattr(doc, "owner_id", None) or (doc.get("owner_id") if isinstance(doc, dict) else None)
+        did = getattr(doc, "id", None) or (doc.get("id") if isinstance(doc, dict) else None)
+        access_key = getattr(doc, "access_key", None) or (doc.get("access_key") if isinstance(doc, dict) else None)
+        if owner_id is None or did is None:
             return None
         if access_key:
-            return f"photo{owner_id}_{pid}_{access_key}"
-        return f"photo{owner_id}_{pid}"
+            return f"doc{owner_id}_{did}_{access_key}"
+        return f"doc{owner_id}_{did}"
+    except Exception:
+        logger.exception("VK upload doc fallback failed")
+        return None
+
+
+async def _upload_result_photo_attachment(message: Message, file_path: str) -> str | None:
+    try:
+        import os
+
+        if not file_path:
+            return None
+        p = file_path
+        if not os.path.isabs(p):
+            p = os.path.join("/app", str(file_path).lstrip("/"))
+        if not os.path.exists(p):
+            return None
+
+        with open(p, "rb") as f:
+            data = f.read()
+
+        attachment = await _upload_photo_via_messages(message, data, "result.jpg")
+        if attachment:
+            return attachment
+        return await _upload_doc_attachment(message, data, "result.jpg")
+    except Exception:
+        logger.exception("VK upload result photo failed")
+        return None
+
+
+async def _upload_photo_bytes_attachment(message: Message, photo_bytes: bytes) -> str | None:
+    try:
+        if not photo_bytes:
+            return None
+        attachment = await _upload_photo_via_messages(message, photo_bytes, "model.jpg")
+        if attachment:
+            return attachment
+        return await _upload_doc_attachment(message, photo_bytes, "model.jpg")
     except Exception:
         logger.exception("VK upload photo bytes failed")
         return None
@@ -561,28 +598,12 @@ async def _send_agreement(message: Message, db: Database, user_id: int) -> None:
 
 async def _send_support(message: Message, db: Database, user_id: int) -> None:
     lang = await _get_lang(db, user_id)
-    contact = (await db.get_app_setting("support_contact_vk", "") or "").strip()
-    if not contact:
-        contact = (await db.get_app_setting("support_contact", "") or "").strip()
-    if not contact:
-        contact = "@bnbslow"
-    st = _get_state(user_id)
-    st.stage = STATE_SUPPORT
-    history = ""
-    try:
-        chat_history = await db.get_support_chat(user_id)
-        if chat_history:
-            tail = chat_history[-5:]
-            lines = []
-            for _id, text, is_admin, _is_read, _created_at, file_id, file_type in tail:
-                prefix = "Support" if is_admin else "You"
-                content = text or (file_type or file_id or "message")
-                lines.append(f"{prefix}: {content}")
-            history = "\n\nLast messages:\n" + "\n".join(lines)
-    except Exception:
-        logger.exception("VK support history failed user_id=%s", user_id)
-    text = f"{get_string('menu_support', lang)}\n\n{contact}{history}\n\nНапишите сообщение для поддержки."
-    await _reply(message, text, keyboard=support_keyboard(lang))
+    _reset_state(user_id)
+    await _reply(
+        message,
+        get_string("support_contact_message", lang),
+        keyboard=back_to_main_keyboard(lang),
+    )
 
 
 async def _send_howto(message: Message, db: Database, user_id: int) -> None:
@@ -828,11 +849,10 @@ def _normal_photos_keyboard(count: int, lang: str) -> str:
 
 
 async def _quality_keyboard(db: Database, user_id: int, lang: str) -> str:
-    import os
     price_1k = await db.get_user_generation_price(user_id)
     keyboard = Keyboard(one_time=False, inline=False)
     keyboard.add(Text(f"{QUALITY_1K_PREFIX} - {price_1k} RUB"), color=KeyboardButtonColor.PRIMARY)
-    if os.getenv("DISABLE_4K") != "1":
+    if not await db.is_4k_disabled():
         price_4k = await db.get_user_generation_charge_rub(user_id, "4k")
         keyboard.row()
         keyboard.add(Text(f"{QUALITY_4K_PREFIX} - {price_4k} RUB"), color=KeyboardButtonColor.PRIMARY)
@@ -901,13 +921,19 @@ def _is_create_text(text: str, lang: str) -> bool:
 
 
 def _parse_quality_text(text_raw: str | None) -> str | None:
-    import os
     val = (text_raw or "").strip().lower()
     if val.startswith("1k") or val.startswith("1к"):
         return "1k"
-    if (val.startswith("4k") or val.startswith("4к")) and os.getenv("DISABLE_4K") != "1":
+    if val.startswith("4k") or val.startswith("4к"):
         return "4k"
     return None
+
+
+async def _parse_quality_text_async(db: Database, text_raw: str | None) -> str | None:
+    quality = _parse_quality_text(text_raw)
+    if quality == "4k" and await db.is_4k_disabled():
+        return None
+    return quality
 
 
 def _is_repeat_text(text: str, lang: str) -> bool:
@@ -1197,6 +1223,15 @@ async def _show_constructor_confirmation(message: Message, db: Database, user_id
 
 async def _ask_quality(message: Message, db: Database, user_id: int, lang: str, flow: str) -> None:
     st = _get_state(user_id)
+    if await db.is_4k_disabled():
+        st.selected_quality = "1k"
+        st.step_values = st.step_values or {}
+        st.step_values["selected_quality"] = "1k"
+        if flow == "constructor":
+            await _show_constructor_confirmation(message, db, user_id, lang)
+        else:
+            await _show_normal_confirmation(message, db, user_id, lang)
+        return
     st.stage = STATE_WAIT_QUALITY
     st.quality_flow = flow
     text = "Выберите качество финальной фотографии:"
@@ -1207,7 +1242,11 @@ async def _show_normal_confirmation(message: Message, db: Database, user_id: int
     st = _get_state(user_id)
     prompt = (st.step_values or {}).get("prompt", "")
     aspect = (st.step_values or {}).get("aspect", "1:1")
-    quality = st.selected_quality or "1k"
+    quality = await db.resolve_photo_quality(st.selected_quality or "1k")
+    if st.selected_quality != quality:
+        st.selected_quality = quality
+        st.step_values = st.step_values or {}
+        st.step_values["selected_quality"] = quality
     images_count = len(st.image_bytes_list or [])
     price = await db.get_user_generation_charge_rub(user_id, quality)
     text = (
@@ -1729,7 +1768,11 @@ async def _run_constructor_generation_real(message: Message, db: Database, user_
         await _reply(message, get_string("vk_prompt_build_error", lang), keyboard=back_to_main_keyboard(lang))
         return
 
-    quality_choice = st.selected_quality or "1k"
+    quality_choice = await db.resolve_photo_quality(st.selected_quality or "1k")
+    if st.selected_quality != quality_choice:
+        st.selected_quality = quality_choice
+        st.step_values = st.step_values or {}
+        st.step_values["selected_quality"] = quality_choice
     balance = await db.get_user_balance(user_id)
     price = await db.get_user_generation_charge_rub(user_id, quality_choice)
     if balance < price:
@@ -2111,17 +2154,17 @@ async def _pick_api_key(db: Database) -> tuple[int | None, str | None, asyncio.L
         last_used_key_id = None
     active_rows = order_keys_after_last_used(active_rows, last_used_key_id)
 
-    for row in active_rows:
-        key_id = int(row[0])
-        lock = await acquire_key_lock_with_wait(key_id, wait_seconds=6.0)
-        if lock is None:
-            continue
-        try:
-            await db.set_app_setting("last_used_api_key_id", str(key_id))
-        except Exception:
-            pass
-        return key_id, str(row[1]), lock
-    return None, None, None
+    # Конкуренцию на ключ держит сам generate_image() через слоты Zveno
+    # (ZVENO_MAX_CONCURRENT_PER_KEY=20). Прежний строгий per-key lock с ожиданием
+    # 6с при единственном ключе выдавал ложное "Все API ключи исчерпали лимиты"
+    # на любом параллельном запросе. Берём активный ключ без эксклюзивного лока.
+    row = active_rows[0]
+    key_id = int(row[0])
+    try:
+        await db.set_app_setting("last_used_api_key_id", str(key_id))
+    except Exception:
+        pass
+    return key_id, str(row[1]), None
 
 
 async def _start_generation_mode(
@@ -2228,7 +2271,11 @@ async def _run_normal_generation_real(message: Message, db: Database, user_id: i
     st = _get_state(user_id)
     prompt = (st.step_values or {}).get("prompt", "")
     aspect_raw = (st.step_values or {}).get("aspect", "1:1")
-    quality_choice = st.selected_quality or "1k"
+    quality_choice = await db.resolve_photo_quality(st.selected_quality or "1k")
+    if st.selected_quality != quality_choice:
+        st.selected_quality = quality_choice
+        st.step_values = st.step_values or {}
+        st.step_values["selected_quality"] = quality_choice
     if not prompt or not st.image_bytes_list:
         st.stage = STATE_WAIT_PHOTO
         await _reply(message, get_string("upload_photo", lang), keyboard=back_to_main_keyboard(lang))
@@ -2363,7 +2410,7 @@ async def _handle_quality_and_confirm(message: Message, db: Database, user_id: i
                 st.stage = STATE_WAIT_ASPECT
                 await _reply(message, get_string("select_format", lang), keyboard=aspect_ratio_keyboard(lang))
             return True
-        quality = _parse_quality_text(text_raw)
+        quality = await _parse_quality_text_async(db, text_raw)
         if not quality:
             await _ask_quality(message, db, user_id, lang, flow=st.quality_flow or "normal")
             return True
@@ -2480,7 +2527,9 @@ async def _handle_result_actions(message: Message, db: Database, user_id: int, l
             await _reply(message, get_string("user_blocked", lang), keyboard=back_to_main_keyboard(lang))
             return True
 
-        quality_choice = st.last_generation_quality or st.selected_quality or "1k"
+        quality_choice = await db.resolve_photo_quality(st.last_generation_quality or st.selected_quality or "1k")
+        if st.selected_quality != quality_choice:
+            st.selected_quality = quality_choice
         price = await db.get_user_generation_charge_rub(user_id, quality_choice)
         balance = await db.get_user_balance(user_id)
         if balance < price:
@@ -2592,7 +2641,9 @@ async def _handle_result_actions(message: Message, db: Database, user_id: int, l
         await _reply(message, get_string("user_blocked", lang), keyboard=back_to_main_keyboard(lang))
         return True
 
-    quality_choice = st.last_generation_quality or st.selected_quality or "1k"
+    quality_choice = await db.resolve_photo_quality(st.last_generation_quality or st.selected_quality or "1k")
+    if st.selected_quality != quality_choice:
+        st.selected_quality = quality_choice
     price = await db.get_user_generation_charge_rub(user_id, quality_choice)
     balance = await db.get_user_balance(user_id)
     if balance < price:

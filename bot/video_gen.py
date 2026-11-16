@@ -47,7 +47,35 @@ class VideoGenerationFailed(VideoError):
             cat = "rate_limit"
         super().__init__(message, category=cat)
 
+
+class VideoBillingError(VideoError):
+    """Provider rejected the job for lack of funds (HTTP 402 / insufficient funds)."""
+    def __init__(self, message: str):
+        super().__init__(message, category="insufficient_funds")
+
+
+def _is_retryable_video_failure(err_str: str) -> bool:
+    """Whether a *failed* video job is worth resubmitting (transient upstream hiccup).
+
+    Excludes permanent rejections (safety/content/invalid input) and billing,
+    where a retry would only waste time and credits.
+    """
+    s = (err_str or "").lower()
+    if any(t in s for t in (
+        "safety", "blocked", "content policy", "nsfw",
+        "invalid", "unsupported", "insufficient",
+    )):
+        return False
+    return any(t in s for t in (
+        "429", "rate", "http failed", "timeout", "timed out", "temporar",
+        "internal", "500", "502", "503", "504", "unavailable", "try again", "failed",
+    ))
+
 ZVENO_BASE_URL = (os.getenv("ZVENO_BASE_URL") or "https://api.zveno.ai").rstrip("/")
+# The video endpoints below always append "/v1/...". If ZVENO_BASE_URL already ends
+# with "/v1" (as it does in some envs), strip it so we never build ".../v1/v1/videos" (404).
+if ZVENO_BASE_URL.endswith("/v1"):
+    ZVENO_BASE_URL = ZVENO_BASE_URL[:-3]
 VIDEO_MODEL = os.getenv("ZVENO_VIDEO_MODEL", "kwaivgI/kling-2.1-standard")
 VIDEO_RESOLUTION = os.getenv("ZVENO_VIDEO_RESOLUTION", "720p")
 VIDEO_POLL_INTERVAL = float(os.getenv("ZVENO_VIDEO_POLL_INTERVAL", "8"))
@@ -106,6 +134,8 @@ async def submit_video_job(
 
                 if resp.status == 429:
                     raise VideoRateLimitError(msg)
+                if resp.status == 402 or "insufficient funds" in msg.lower() or "insufficient credits" in msg.lower():
+                    raise VideoBillingError(msg)
                 raise VideoSubmitError(msg)
 
 
@@ -199,6 +229,42 @@ def _resize_image_bytes(img_bytes: bytes) -> bytes:
     return buf.getvalue()
 
 
+def _crop_to_aspect(img_bytes: bytes, aspect_ratio: str) -> bytes:
+    """Center-crop image to the target W:H aspect.
+
+    Kling image-to-video derives the OUTPUT aspect from the input frame and ignores
+    the API ``aspect_ratio`` field, so to honor the user's chosen format (e.g. 9:16,
+    4:5) we must conform the input frame itself.
+    """
+    try:
+        tw, th = aspect_ratio.split(":")
+        target = float(tw) / float(th)
+    except Exception:
+        return img_bytes
+    if target <= 0:
+        return img_bytes
+
+    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    w, h = img.size
+    cur = w / h
+    if abs(cur - target) < 0.01:
+        return img_bytes  # already correct shape
+
+    if cur > target:
+        new_w = max(1, int(round(h * target)))
+        left = (w - new_w) // 2
+        img = img.crop((left, 0, left + new_w, h))
+    else:
+        new_h = max(1, int(round(w / target)))
+        top = (h - new_h) // 2
+        img = img.crop((0, top, w, top + new_h))
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=92)
+    logger.info("[VIDEO] cropped input %dx%d -> %dx%d for aspect %s", w, h, img.size[0], img.size[1], aspect_ratio)
+    return buf.getvalue()
+
+
 def build_frame_images_from_bytes(
     images: list[bytes],
     labels: list[str] | None = None,
@@ -239,6 +305,7 @@ async def generate_video(
     """Full pipeline: submit → poll → download. Returns (video_path, job_data)."""
     frame_images = None
     if image_bytes:
+        image_bytes = _crop_to_aspect(image_bytes, aspect_ratio)
         frame_images = build_frame_images_from_bytes([image_bytes], ["first_frame"])
 
     max_retries_on_429 = int(os.getenv("VIDEO_429_RETRIES", "2"))
@@ -255,13 +322,13 @@ async def generate_video(
 
         err = result.get("error", "unknown error")
         err_str = str(err)
-        is_429 = "429" in err_str
-        if is_429 and attempt < max_retries_on_429:
-            wait = 30 * attempt
-            logger.warning("[VIDEO] job %s failed with 429, retrying in %ss (attempt %s/%s)...",
-                           job_id, wait, attempt, max_retries_on_429)
+        if attempt < max_retries_on_429 and _is_retryable_video_failure(err_str):
+            wait = 10 * attempt
+            logger.warning("[VIDEO] job %s failed (%.160s), retrying in %ss (attempt %s/%s)...",
+                           job_id, err_str, wait, attempt, max_retries_on_429)
             await asyncio.sleep(wait)
             continue
+        logger.error("[VIDEO] job %s failed permanently: %s | full=%r", job_id, err_str, result)
         raise VideoGenerationFailed(err_str)
 
     os.makedirs("/tmp/video_gen", exist_ok=True)

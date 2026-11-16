@@ -2958,6 +2958,25 @@ async def index(request: Request, db: aiosqlite.Connection = Depends(get_db), us
             maintenance = row[0] == '1' if row else False
     except Exception: pass
 
+    disable_4k = False
+    try:
+        async with db.execute("SELECT value FROM app_settings WHERE key='disable_4k'") as cur:
+            row = await cur.fetchone()
+            if row is None:
+                # Первый заход: зеркалим текущий DISABLE_4K из env, чтобы деплой не менял поведение.
+                env_disabled = os.getenv("DISABLE_4K", "0").strip() == "1"
+                await db.execute(
+                    "INSERT INTO app_settings (key, value) VALUES ('disable_4k', ?) "
+                    "ON CONFLICT(key) DO NOTHING",
+                    ("1" if env_disabled else "0",),
+                )
+                await db.commit()
+                disable_4k = env_disabled
+            else:
+                disable_4k = str(row[0]).strip() == "1"
+    except Exception:
+        pass
+
     proxy_status = await check_proxy(db)
     
     
@@ -2984,7 +3003,7 @@ async def index(request: Request, db: aiosqlite.Connection = Depends(get_db), us
         "today_video_gens": today_video_gens, "total_video_gens": total_video_gens,
         "today_1k": today_1k, "today_4k": today_4k,
         "total_zveno_calls": total_zveno_calls,
-        "maintenance": maintenance, "proxy_status": proxy_status,
+        "maintenance": maintenance, "disable_4k": disable_4k, "proxy_status": proxy_status,
         "recent_errors": recent_errors, "proxy_errors_count": proxy_errors_count
     })
 
@@ -3024,10 +3043,17 @@ async def list_users(request: Request, q: str = "", db: aiosqlite.Connection = D
         async with db.execute(query) as cur:
             rows = await cur.fetchall()
     users = [dict(zip(r.keys(), r)) for r in rows]
+    async with db.execute("SELECT value FROM app_settings WHERE key='standard_1k_price_rub'") as cur:
+        _sp = await cur.fetchone()
+    try:
+        standard_price = int(_sp[0]) if _sp and _sp[0] is not None else 30
+    except (ValueError, TypeError):
+        standard_price = 30
     return templates.TemplateResponse("users.html", {
-        "request": request, 
-        "users": users, 
-        "q": q
+        "request": request,
+        "users": users,
+        "q": q,
+        "standard_price": standard_price,
     })
 
 @app.post("/users/edit_balance")
@@ -3067,6 +3093,28 @@ async def edit_balance(
     
     await db.commit()
     return RedirectResponse(url=f"/users?q={user_id}", status_code=303)
+
+@app.post("/users/set_standard_price")
+async def set_standard_price(
+    price: int = Form(...),
+    db: aiosqlite.Connection = Depends(get_db),
+    user: str = Depends(get_current_username),
+):
+    """Массовая смена стандартной цены 1K: применяется ко ВСЕМ пользователям БЕЗ своей
+    (кастомной) цены. Пользователи с заданным custom_1k_price_rub не затрагиваются."""
+    p = max(1, int(price))
+    await db.execute(
+        "INSERT INTO app_settings (key, value) VALUES ('standard_1k_price_rub', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (str(p),),
+    )
+    # Синхроним легаси-колонку (для отображения) только у стандартных пользователей.
+    await db.execute(
+        "UPDATE users SET generation_price = ? WHERE custom_1k_price_rub IS NULL",
+        (p,),
+    )
+    await db.commit()
+    return RedirectResponse(url="/users", status_code=303)
 
 @app.post("/admin/block_user")
 async def admin_block_user_route(
@@ -3763,6 +3811,7 @@ async def list_prompts(request: Request, db: aiosqlite.Connection = Depends(get_
         "own_prompt",
         "own_variant_prompt",
         "presets_prompt",
+        "photostudio_wb_prompt",
         "video_prompt",
         "video_clothing_prompt",
     ]
@@ -4002,6 +4051,7 @@ async def update_single_category_prompt(
         "own_prompt",
         "own_variant_prompt",
         "presets_prompt",
+        "photostudio_wb_prompt",
         "video_prompt",
         "video_clothing_prompt",
     }
@@ -4958,6 +5008,29 @@ async def toggle_maintenance(db: aiosqlite.Connection = Depends(get_db), user: s
             pass
 
     await db.execute("INSERT INTO app_settings (key, value) VALUES ('maintenance', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (new_val,))
+    await db.commit()
+    return RedirectResponse(url="/", status_code=303)
+
+
+@app.post("/settings/disable_4k/toggle")
+async def toggle_disable_4k(db: aiosqlite.Connection = Depends(get_db), user: str = Depends(get_current_username)):
+    current = False
+    try:
+        async with db.execute("SELECT value FROM app_settings WHERE key='disable_4k'") as cur:
+            row = await cur.fetchone()
+            if row is None:
+                current = os.getenv("DISABLE_4K", "0").strip() == "1"
+            else:
+                current = str(row[0]).strip() == "1"
+    except Exception:
+        pass
+
+    new_val = "0" if current else "1"
+    await db.execute(
+        "INSERT INTO app_settings (key, value) VALUES ('disable_4k', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (new_val,),
+    )
     await db.commit()
     return RedirectResponse(url="/", status_code=303)
 
