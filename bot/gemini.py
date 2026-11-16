@@ -426,7 +426,7 @@ async def enrich_prompt_with_zveno(
 
 def _resolve_zveno_image_model(model_name: str | None) -> str:
     """Модель для генерации изображения в Zveno (формат vendor/model)."""
-    default_raw = (os.getenv("ZVENO_IMAGE_MODEL") or "google/gemini-3-pro-image-preview").strip()
+    default_raw = (os.getenv("ZVENO_IMAGE_MODEL") or "google/gemini-nano-banana-2.1").strip()
     mn = (model_name or "").strip()
     if not mn or "vertex" in mn.lower():
         return default_raw if "/" in default_raw else f"google/{default_raw.removeprefix('google/')}"
@@ -449,9 +449,9 @@ def _pick_zveno_image_model(model_name: str | None, generation_meta: dict | None
     if str(quality).lower() == "4k":
         # Все 4K → nano banana pro (детальная модель). Нативный 4K (3712×4608)
         # обеспечивает image_size="4K" + чтение последнего кадра из ответа.
-        pro = (os.getenv("ZVENO_IMAGE_MODEL_PRO") or "google/gemini-3-pro-image-preview").strip()
+        pro = (os.getenv("ZVENO_IMAGE_MODEL_PRO") or "google/gemini-nano-banana-2.1").strip()
         return _resolve_zveno_image_model(pro)
-    model = os.getenv("ZVENO_IMAGE_MODEL_CHEAP") or "google/gemini-3.1-flash-image-preview"
+    model = os.getenv("ZVENO_IMAGE_MODEL_CHEAP") or "google/gemini-nano-banana-2.1"
     return _resolve_zveno_image_model(model)
 
 
@@ -916,7 +916,7 @@ async def upscale_image_vertex(session: aiohttp.ClientSession, api_key: str, ima
             (
                 os.getenv("ZVENO_UPSCALE_MODEL")
                 or os.getenv("ZVENO_IMAGE_MODEL_CHEAP")
-                or "google/gemini-3.1-flash-image-preview"
+                or "google/gemini-nano-banana-2.1"
             )
         )
         if prompt and ("model" in prompt.lower() or "person" in prompt.lower() or "face" in prompt.lower()):

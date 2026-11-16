@@ -6,8 +6,8 @@ import asyncio
 logger = logging.getLogger(__name__)
 
 # Тариф для пользователя (бот): 1K / 4K. Индивидуально только через админку (custom_1k_price_rub).
-DEFAULT_USER_TARIFF_1K_RUB = 30
-DEFAULT_USER_TARIFF_4K_RUB = 50
+DEFAULT_USER_TARIFF_1K_RUB = 25
+DEFAULT_USER_TARIFF_4K_RUB = 40
 
 DB_BUSY_TIMEOUT_SECONDS = 15.0
 DB_LOCK_RETRY_ATTEMPTS = 4
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS users (
     language TEXT NOT NULL DEFAULT 'ru',
     trial_used INTEGER NOT NULL DEFAULT 0,
     balance INTEGER NOT NULL DEFAULT 50,
-    generation_price INTEGER NOT NULL DEFAULT 30,
+    generation_price INTEGER NOT NULL DEFAULT 25,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -400,9 +400,9 @@ class Database:
         await self._seed_prompts()
         await self._seed_templates()
         await self._seed_subscription_plans()
-        await self._seed_app_settings()
-        await self._seed_categories()
-        await self._seed_library()
+        await self._seed_app_settings() 
+        await self._seed_categories() 
+        await self._seed_library() 
         # Idempotent: ensures the «Коллаж» clothing-attribute steps exist on new AND existing
         # databases (add_* skip anything already present), so live clients are not disturbed.
         await self.ensure_collage_steps()

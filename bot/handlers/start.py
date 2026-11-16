@@ -149,7 +149,7 @@ def _progress_bar_expected_wall_seconds() -> float:
 
 def _primary_image_model() -> str:
     """Основная модель генерации для Zveno."""
-    return "gemini-3.1-flash-image-preview"
+    return "gemini-nano-banana-2.1"
 
 
 def _dedupe_non_empty(values: list[str | None]) -> list[str]:
@@ -225,7 +225,7 @@ async def _collect_input_photos(data: dict, category: str | None, db: Database) 
         prod = data.get("own_product_photo_id") or data.get("photo")
         input_photos.extend([ref, prod])
 
-    elif category == "collage" or data.get("collage_mode"):
+    elif category == "collage" or data.get("collage_mode") or data.get("collage_model_photo"):
         model_ph = data.get("collage_model_photo")
         front_ph = data.get("collage_front_photo")
         back_ph = data.get("collage_back_photo")
@@ -1109,7 +1109,10 @@ async def on_dynamic_input(message: Message, state: FSMContext, db: Database) ->
             elif any(x in low_key for x in ("adv_", "преимущество")):
                 max_len = 100
             elif any(x in low_key for x in ("extra_info", "доп_текст")):
-                max_len = 80
+                if data.get("category") in ("infographic_clothing", "infographic_other"):
+                    max_len = 800
+                else:
+                    max_len = 80
             elif waiting_custom_for:
                 max_len = 70
 
@@ -1332,8 +1335,7 @@ async def on_create_category_universal(callback: CallbackQuery, db: Database, st
         return
 
     if cat_key == "infographics":
-        await on_infographic_selection_menu(callback, db)
-        return
+        cat_key = "infographic_clothing"
 
     await state.clear()
     await state.update_data(category=cat_key)
@@ -3783,7 +3785,7 @@ async def _do_generate_real(message_or_callback: Message | CallbackQuery, state:
             result_path = None
             last_key_id = 0
             last_key_preview = "zveno"
-            last_model_used = "gemini-3-pro-image-preview"
+            last_model_used = "gemini-nano-banana-2.1"
 
             if not images_data:
                 last_error_msg = "input_photo_download_failed"
@@ -4218,7 +4220,7 @@ async def on_result_edit_text_real(message: Message, state: FSMContext, db: Data
         result_path = None
         kid_used = 0
         key_preview_used = "zveno"
-        model_used = "gemini-3-pro-image-preview"
+        model_used = "gemini-nano-banana-2.1"
         gen_meta: dict = {"category": category, "user_id": user_id}
 
         images_data = []
@@ -4347,7 +4349,7 @@ async def on_result_edit_text_real(message: Message, state: FSMContext, db: Data
                     "_generation_meta": {
                         "key_id": kid_used,
                         "api_key_preview": key_preview_used,
-                        "model_used": model_used or "gemini-3-pro-image-preview",
+                        "model_used": model_used or "gemini-nano-banana-2.1",
                     },
                 }),
                 input_photos=json.dumps(input_photos),

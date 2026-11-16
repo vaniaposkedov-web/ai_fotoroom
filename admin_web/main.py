@@ -3046,9 +3046,9 @@ async def list_users(request: Request, q: str = "", db: aiosqlite.Connection = D
     async with db.execute("SELECT value FROM app_settings WHERE key='standard_1k_price_rub'") as cur:
         _sp = await cur.fetchone()
     try:
-        standard_price = int(_sp[0]) if _sp and _sp[0] is not None else 30
+        standard_price = int(_sp[0]) if _sp and _sp[0] is not None else 25
     except (ValueError, TypeError):
-        standard_price = 30
+        standard_price = 25
     return templates.TemplateResponse("users.html", {
         "request": request,
         "users": users,
@@ -3073,10 +3073,22 @@ async def edit_balance(
     change = amount - old_balance
 
     raw = (price or "").strip()
+    # Цена, равная текущему стандарту, = «стандартный» пользователь (не закрепляем её),
+    # иначе любое пополнение баланса замораживало бы человеку цену.
+    standard = DEFAULT_USER_TARIFF_1K_RUB
+    async with db.execute("SELECT value FROM app_settings WHERE key='standard_1k_price_rub'") as cur:
+        _sp = await cur.fetchone()
+    try:
+        if _sp and _sp[0] is not None:
+            standard = max(1, int(_sp[0]))
+    except (ValueError, TypeError):
+        pass
+    if raw.isdigit() and int(raw) == standard:
+        raw = ""
     if not raw:
         await db.execute(
             "UPDATE users SET balance = ?, custom_1k_price_rub = NULL, generation_price = ? WHERE id = ?",
-            (amount, DEFAULT_USER_TARIFF_1K_RUB, user_id),
+            (amount, standard, user_id),
         )
     else:
         safe_price = max(1, int(raw))

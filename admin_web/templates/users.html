@@ -55,7 +55,12 @@
                                 <span class="badge bg-secondary">стандарт</span>
                             {% endif %}
                         </label>
-                        <input type="number" name="price" class="form-control" value="{{ user.generation_price or 25 }}" min="1" required>
+                        {# Показываем реальную цену: свою (кастомную) или текущий стандарт.
+                           Если при сохранении цена = стандарт (или пусто) — человек остаётся «стандартным»,
+                           цена НЕ закрепляется (раньше любое пополнение замораживало, например, 30 ₽). #}
+                        <input type="number" name="price" class="form-control"
+                               value="{{ user.custom_1k_price_rub if user.custom_1k_price_rub is not none else standard_price }}"
+                               min="1" placeholder="стандарт ({{ standard_price }} ₽)">
                     </div>
                 </div>
                 <button type="submit" class="btn btn-success w-100">Сохранить</button>
