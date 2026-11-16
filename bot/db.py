@@ -1045,7 +1045,7 @@ class Database:
         return p
 
     async def get_user_generation_charge_rub(self, user_id: int, quality: str) -> int:
-        """Списание с баланса пользователя: 4K = 50 ₽; 1K = тариф выше."""
+        """Списание с баланса пользователя: 4K = DEFAULT_USER_TARIFF_4K_RUB (40 ₽); 1K = тариф выше."""
         q = (quality or "1k").strip().lower()
         if q == "4k":
             return DEFAULT_USER_TARIFF_4K_RUB
