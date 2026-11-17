@@ -4802,8 +4802,8 @@ async def on_video_prompt(message: Message, state: FSMContext, db: Database) -> 
 async def on_video_aspect(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
     lang = await db.get_user_language(callback.from_user.id)
     raw = callback.data
-    if raw == "video_aspect:4:5":
-        aspect = "4:5"
+    if raw == "video_aspect:3:4":
+        aspect = "3:4"
     else:
         aspect = "9:16"
     await state.update_data(video_aspect=aspect)
@@ -4813,7 +4813,7 @@ async def on_video_aspect(callback: CallbackQuery, state: FSMContext, db: Databa
     await _safe_answer(callback)
 
 
-VIDEO_PRICES = {5: 65, 10: 99}
+VIDEO_PRICES = {5: 75, 10: 150}
 
 _VIDEO_PROGRESS_STEPS = [
     (0,   "📸 Подготовка фото..."),
@@ -4852,7 +4852,7 @@ async def on_video_duration(callback: CallbackQuery, state: FSMContext, db: Data
     data = await state.get_data()
     mode = data.get("video_mode", "normal")
     aspect = data.get("video_aspect", "9:16")
-    price = VIDEO_PRICES.get(duration, 65)
+    price = VIDEO_PRICES.get(duration, 75)
 
     mode_label = _VIDEO_MODE_LABELS.get(mode, mode)
     user_prompt_preview = data.get("video_user_prompt", "")
@@ -4937,7 +4937,7 @@ async def _on_video_confirm_real(callback: CallbackQuery, state: FSMContext, db:
         await _safe_answer(callback, get_string("user_blocked", lang), show_alert=True)
         return
 
-    price = VIDEO_PRICES.get(duration, 65)
+    price = VIDEO_PRICES.get(duration, 75)
     balance = await db.get_user_balance(user_id)
     if balance < price:
         await _safe_answer(callback,

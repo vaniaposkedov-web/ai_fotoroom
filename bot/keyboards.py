@@ -108,8 +108,8 @@ def video_mode_keyboard(lang="ru") -> InlineKeyboardMarkup:
 def video_aspect_keyboard(lang="ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=get_string("video_aspect_4_5", lang), callback_data="video_aspect:4:5")],
             [InlineKeyboardButton(text=get_string("video_aspect_9_16", lang), callback_data="video_aspect:9:16")],
+            [InlineKeyboardButton(text=get_string("video_aspect_3_4", lang), callback_data="video_aspect:3:4")],
             [InlineKeyboardButton(text=get_string("back", lang), callback_data="back_main")],
         ]
     )
