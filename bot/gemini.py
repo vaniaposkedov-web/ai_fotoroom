@@ -754,7 +754,7 @@ async def _polza_image_request(
         data = await polza_media_request(
             session, api_key, model, media_input,
             timeout_sec=timeout_sec,
-            poll_interval=max(0.5, _env_float("POLZA_IMAGE_POLL_SECONDS", 1.0)),
+            poll_interval=max(1.0, _env_float("POLZA_IMAGE_POLL_SECONDS", 3.0)),
             provider=_build_polza_provider_preferences(),
         )
         status = str(data.get("status") or "")
