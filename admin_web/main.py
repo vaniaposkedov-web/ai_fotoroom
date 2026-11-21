@@ -3887,7 +3887,7 @@ async def list_proxies_page(request: Request, db: aiosqlite.Connection = Depends
     async with db.execute("SELECT * FROM proxies ORDER BY created_at DESC") as cur:
         proxies = await cur.fetchall()
     try:
-        async with db.execute("SELECT * FROM api_keys ORDER BY is_active DESC, id") as cur:
+        async with db.execute("SELECT * FROM api_keys WHERE provider='polza' ORDER BY is_active DESC, id") as cur:
             gemini_keys = await cur.fetchall()
     except Exception:
         gemini_keys = []
@@ -4283,7 +4283,7 @@ async def test_channel_settings(
 @app.get("/api_keys", response_class=HTMLResponse)
 async def list_keys(request: Request, db: aiosqlite.Connection = Depends(get_db), user: str = Depends(get_current_username)):
     try:
-        async with db.execute("SELECT * FROM api_keys ORDER BY is_active DESC, id") as cur:
+        async with db.execute("SELECT * FROM api_keys WHERE provider='polza' ORDER BY is_active DESC, id") as cur:
             gemini_keys = await cur.fetchall()
     except Exception: gemini_keys = []
 

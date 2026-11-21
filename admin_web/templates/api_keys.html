@@ -71,28 +71,21 @@
         </thead>
         <tbody>
           {% for k in gemini_keys %}
-          {% set provider = (k['provider'] if 'provider' in k.keys() else 'zveno') or 'zveno' %}
           <tr class="border-top">
             <td class="key-mask text-break">
               {% set t = k.token or '' %}
               {% if t|length > 22 %}{{ t[:14] }}…{{ t[-6:] }}{% else %}{{ t }}{% endif %}
             </td>
             <td>
-              {% if provider == 'polza' %}
               <span class="badge rounded-pill bg-primary">Polza.ai</span>
-              {% else %}
-              <span class="badge rounded-pill bg-light text-muted border" title="Старый ключ Zveno — не используется">Zveno (старый)</span>
-              {% endif %}
             </td>
             <td>
-              <span class="badge rounded-pill {{ 'bg-success' if k.is_active and provider == 'polza' else 'bg-secondary' }}">
-                {{ "on" if k.is_active and provider == 'polza' else "off" }}
+              <span class="badge rounded-pill {{ 'bg-success' if k.is_active else 'bg-secondary' }}">
+                {{ "on" if k.is_active else "off" }}
               </span>
             </td>
             <td class="text-end text-nowrap">
-              {% if provider == 'polza' %}
               <a href="/api_keys/toggle/{{ k.id }}" class="btn btn-sm btn-outline-secondary py-0 px-2">вкл/выкл</a>
-              {% endif %}
               <a href="/api_keys/delete/{{ k.id }}" class="btn btn-sm btn-outline-danger py-0 px-2" onclick="return confirm('Удалить ключ?')">×</a>
             </td>
           </tr>
