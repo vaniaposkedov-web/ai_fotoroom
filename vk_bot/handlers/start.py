@@ -1484,40 +1484,8 @@ async def _collect_constructor_images(db: Database, st: VkUserState) -> list[byt
 
 
 def _render_generation_error(lang: str, err: Exception) -> tuple[str, bool]:
-    msg = str(err or "")
-    low = msg.lower()
-
-    if any(w in low for w in ("safety", "blocked", "prohibited", "violated", "filtered", "policy", "sensitive")):
-        return ("🔞 Генерация заблокирована нейросетью.\n\n"
-                "Сработал фильтр безопасности контента. Убедитесь, что на фото нет глубокого декольте, "
-                "нижнего белья, открытых частей тела или провокационных поз. Пожалуйста, выберите другое фото."), False
-    if "503" in low or "high demand" in low or "unavailable" in low:
-        return "⚠️ Сейчас сервис генерации перегружен. Попробуйте повторить через 1-2 минуты.", True
-    if "generation_total_timeout" in low:
-        return "⚠️ Генерация превысила лимит времени. Попробуйте еще раз с менее сложным промптом/фото.", True
-    if "timed out" in low or "timeout" in low or "proxy/network error" in low or "таймаут" in low:
-        use_proxy = str(os.getenv("GEMINI_USE_PROXY", "")).lower() in ("1", "true", "yes")
-        if use_proxy:
-            return "⚠️ Временная сетевая ошибка сервиса генерации. Серверы сейчас под высокой нагрузкой. Попробуйте еще раз через 20-60 секунд.", True
-        return "⚠️ Временная сетевая ошибка сервиса генерации. Серверы сейчас под высокой нагрузкой. Попробуйте еще раз через 10-30 секунд.", True
-    if "all_keys_busy" in low or "kie_keys_busy" in low or "polza_keys_busy" in low:
-        return "⚠️ Сейчас все ключи заняты активными запросами. Повторите через 10-20 секунд.", True
-    if "polza_insufficient_credits" in low or "insufficient credits" in low:
-        return "⚠️ Сервис генерации временно недоступен. Мы уже получили уведомление и работаем над восстановлением. Попробуйте повторить чуть позже.", True
-    if "image_generation_provider_location_unsupported" in low or "location is not supported" in low:
-        return "⚠️ Сервис генерации временно недоступен на стороне провайдера. Мы уже получили уведомление. Попробуйте повторить чуть позже.", True
-    if "апскейл превысил" in low or "upscale timeout" in low:
-        return "⚠️ Изображение подготовлено в стандартном качестве, этап 4K занял слишком много времени. Попробуйте повторить позже.", True
-    if "image_generation_empty_image" in low or "polza_empty_image" in low or "empty_result" in low:
-        return "⚠️ Нейросеть вернула ответ без изображения. Попробуйте другой ракурс/промпт и повторите.", True
-    if "image_generation_failed_try_again" in low:
-        return ("⚠️ Не удалось завершить генерацию в этот раз. Попробуйте еще раз. "
-                "Если ошибка повторится, выберите другое фото модели и повторите."), True
-    if "input_photo_download_failed" in low:
-        return "⚠️ Не удалось получить входные фото. Пожалуйста, отправьте фото еще раз.", False
-    if "network" in low or "connection reset" in low:
-        return "⚠️ Временная сетевая ошибка сервиса генерации. Попробуйте еще раз через 20-60 секунд.", True
-    return get_string("gen_error_contact_support", lang), True
+    # Пользователь всегда видит одно нейтральное сообщение; детали ошибки получают только админы.
+    return get_string("api_error_user", lang), True
 
 
 async def _notify_admins_vk(db: Database, text: str) -> None:

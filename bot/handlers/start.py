@@ -3954,54 +3954,9 @@ async def _do_generate_real(message_or_callback: Message | CallbackQuery, state:
         except Exception:
             pass
 
-        msg_l = (last_error_msg or "").lower()
-        show_retry = False
-
-        if last_error_msg and any(
-                word in msg_l for word in
-                ["safety", "blocked", "prohibited", "violated", "filtered", "policy", "sensitive"]):
-            err_text = "🔞 <b>Генерация заблокирована нейросетью.</b>\n\nСработал фильтр безопасности контента. Убедитесь, что на фото нет глубокого декольте, нижнего белья, открытых частей тела или провокационных поз. Пожалуйста, выберите другое фото."
-            show_retry = False
-        elif "503" in msg_l or "high demand" in msg_l or "unavailable" in msg_l:
-            err_text = "⚠️ Сейчас сервис генерации перегружен. Попробуйте повторить через 1-2 минуты."
-            show_retry = True
-        elif "generation_total_timeout" in msg_l:
-            err_text = "⚠️ Генерация превысила лимит времени. Попробуйте еще раз с менее сложным промптом/фото."
-            show_retry = True
-        elif "timed out" in msg_l or "timeout" in msg_l or "proxy/network error" in msg_l or "таймаут" in msg_l:
-            use_proxy_mode = str(os.getenv("GEMINI_USE_PROXY", "")).lower() in ("1", "true", "yes")
-            if use_proxy_mode:
-                err_text = "⚠️ Временная сетевая ошибка сервиса генерации. Серверы сейчас под высокой нагрузкой. Попробуйте еще раз через 20-60 секунд."
-            else:
-                err_text = "⚠️ Временная сетевая ошибка сервиса генерации. Серверы сейчас под высокой нагрузкой. Попробуйте еще раз через 10-30 секунд."
-            show_retry = True
-        elif "all_keys_busy" in msg_l or "kie_keys_busy" in msg_l or "polza_keys_busy" in msg_l:
-            err_text = "⚠️ Сейчас все ключи заняты активными запросами. Повторите через 10-20 секунд."
-            show_retry = True
-        elif "polza_insufficient_credits" in msg_l or "insufficient credits" in msg_l:
-            err_text = "⚠️ Сервис генерации временно недоступен. Мы уже получили уведомление и работаем над восстановлением. Попробуйте повторить чуть позже."
-            show_retry = True
-        elif "image_generation_provider_location_unsupported" in msg_l or "location is not supported" in msg_l:
-            err_text = "⚠️ Сервис генерации временно недоступен на стороне провайдера. Мы уже получили уведомление. Попробуйте повторить чуть позже."
-            show_retry = True
-        elif "апскейл превысил" in msg_l or "upscale timeout" in msg_l:
-            err_text = "⚠️ Изображение подготовлено в стандартном качестве, этап 4K занял слишком много времени. Попробуйте повторить позже."
-            show_retry = True
-        elif "image_generation_empty_image" in msg_l or "polza_empty_image" in msg_l or "empty_result" in msg_l:
-            err_text = "⚠️ Нейросеть вернула ответ без изображения. Попробуйте другой ракурс/промпт и повторите."
-            show_retry = True
-        elif "image_generation_failed_try_again" in msg_l:
-            err_text = (
-                "⚠️ Не удалось завершить генерацию в этот раз. Нажмите «Попробовать еще раз». "
-                "Если ошибка повторится, выберите другое фото модели и повторите."
-            )
-            show_retry = True
-        elif "input_photo_download_failed" in msg_l:
-            err_text = "⚠️ Не удалось получить входные фото. Пожалуйста, отправьте фото еще раз."
-
-        else:
-            err_text = get_string("api_error_user", lang)
-            show_retry = True
+        # Пользователь всегда видит одно нейтральное сообщение; детали ошибки получают только админы.
+        err_text = get_string("api_error_user", lang)
+        show_retry = True
 
         retry_kb = None
         if show_retry:
@@ -4048,7 +4003,7 @@ async def _do_generate_real(message_or_callback: Message | CallbackQuery, state:
         except Exception:
             pass
 
-        err_text = get_string("gen_error_contact_support", lang)
+        err_text = get_string("api_error_user", lang)
 
         from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
         crit_retry_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -4361,27 +4316,15 @@ async def on_result_edit_text_real(message: Message, state: FSMContext, db: Data
 
             await state.set_state(CreateForm.result_ready)
         else:
-            msg_l = (last_error_msg or "").lower()
-            if any(word in msg_l for word in ["safety", "blocked", "prohibited", "violated", "filtered", "policy", "sensitive"]):
-                await message.answer(
-                    "🔞 <b>Запрос отклонен нейросетью.</b> Сработал фильтр безопасности контента. Попробуйте загрузить менее откровенное фото или изменить промпт.",
-                    parse_mode="HTML")
-            elif "all_keys_busy" in msg_l or "kie_keys_busy" in msg_l or "polza_keys_busy" in msg_l:
-                await message.answer("⚠️ Сейчас все ключи заняты активными запросами. Попробуйте через 10-20 секунд.")
-            elif "polza_insufficient_credits" in msg_l or "insufficient credits" in msg_l:
-                await message.answer("⚠️ Сервис генерации временно недоступен. Мы уже получили уведомление и работаем над восстановлением. Попробуйте чуть позже.")
-            elif "timeout" in msg_l or "таймаут" in msg_l:
-                await message.answer(
-                    "⚠️ Генерация заняла слишком много времени. Серверы сейчас под высокой нагрузкой. Попробуйте еще раз через 20-60 секунд.")
-            elif "image_generation_empty_image" in msg_l or "polza_empty_image" in msg_l or "empty_result" in msg_l:
-                await message.answer("⚠️ Нейросеть вернула ответ без изображения. Попробуйте изменить текст правок.")
-            else:
-                await message.answer(get_string("gen_error", lang))
+            logger.error("[edit] generation failed user=%s: %s", user_id, last_error_msg)
+            await _notify_admins_generic_error(bot_for_notify(message), "Ошибка правки фото", user_id, last_error_msg)
+            await message.answer(get_string("api_error_user", lang), reply_markup=_user_error_retry_kb("result_edit"))
 
     except Exception as e:
         logger.error(f"Critical error in on_result_edit_text: {e}")
         try:
-            await message.answer(get_string("gen_error", lang))
+            await _notify_admins_generic_error(bot_for_notify(message), "Ошибка правки фото", user_id, f"critical_exception:{type(e).__name__}:{e}")
+            await message.answer(get_string("api_error_user", lang), reply_markup=_user_error_retry_kb("result_edit"))
         except Exception:
             pass
     finally:
@@ -4886,10 +4829,37 @@ async def on_video_confirm(callback: CallbackQuery, state: FSMContext, db: Datab
         await _on_video_confirm_real(callback, state, db, bot)
 
 
+def _user_error_retry_kb(callback_data: str):
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Попробовать еще раз", callback_data=callback_data)]
+    ])
+
+
+def bot_for_notify(message: Message):
+    return message.bot
+
+
+async def _notify_admins_generic_error(bot, title: str, user_id: int, err) -> None:
+    """Технические детали ошибки — только админам (пользователь видит api_error_user)."""
+    try:
+        settings = load_settings()
+        admin_ids = settings.admin_ids or [1440716472, 916948327]
+        short = str(err or "unknown_error").strip()[:600]
+        text = f"⚠️ {title}\nUser: {user_id}\nError: {short}"
+        for aid in admin_ids:
+            try:
+                await bot.send_message(chat_id=int(aid), text=text)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 async def _notify_admins_video_error(db: Database, bot: Bot, user_id: int, err: str) -> None:
     """Throttled admin alert for video failures that need operator action (e.g. provider out of funds)."""
     try:
-        cooldown_s = 300
+        cooldown_s = 90
         now_ts = int(time.time())
         try:
             last_ts = int(str(await db.get_app_setting("tg_video_error_notify_last_ts", "0") or "0").strip() or "0")
@@ -4905,9 +4875,8 @@ async def _notify_admins_video_error(db: Database, bot: Bot, user_id: int, err: 
         admin_ids = settings.admin_ids or [1440716472, 916948327]
         short = (err or "").strip()[:600]
         text = (
-            "⚠️ Видео: провайдер отклонил генерацию\n"
+            "⚠️ Ошибка генерации видео\n"
             f"User: {user_id}\n"
-            "Похоже, у провайдера видео недостаточно средств — пополните баланс.\n"
             f"Error: {short}"
         )
         for aid in admin_ids:
@@ -4969,7 +4938,7 @@ async def _on_video_confirm_real(callback: CallbackQuery, state: FSMContext, db:
 
     z_key = await acquire_polza_key_slot()
     if not z_key:
-        await progress_msg.edit_text(get_string("video_err_no_keys", lang))
+        await progress_msg.edit_text(get_string("api_error_user", lang), reply_markup=_user_error_retry_kb("video_menu"))
         return
 
     try:
@@ -4977,7 +4946,8 @@ async def _on_video_confirm_real(callback: CallbackQuery, state: FSMContext, db:
         images_bytes = await telegram_file_ids_to_bytes_list(bot, photo_ids, base_dir=BASE_DIR)
 
         if not images_bytes:
-            await progress_msg.edit_text(get_string("video_failed", lang))
+            await _notify_admins_video_error(db, bot, user_id, "video_input_photo_download_failed")
+            await progress_msg.edit_text(get_string("api_error_user", lang), reply_markup=_user_error_retry_kb("video_menu"))
             return
 
         video_path, job_data = await asyncio.wait_for(
@@ -5037,21 +5007,16 @@ async def _on_video_confirm_real(callback: CallbackQuery, state: FSMContext, db:
 
     except asyncio.TimeoutError:
         logger.error("[VIDEO] timeout user=%s", user_id)
-        await progress_msg.edit_text(get_string("video_err_timeout", lang))
+        await _notify_admins_video_error(db, bot, user_id, "video_timeout")
+        await progress_msg.edit_text(get_string("api_error_user", lang), reply_markup=_user_error_retry_kb("video_menu"))
     except VideoError as exc:
         logger.error("[VIDEO] error user=%s mode=%s cat=%s: %s", user_id, video_mode, exc.category, exc, exc_info=True)
-        err_key = {
-            "rate_limit": "video_err_rate_limit",
-            "timeout": "video_err_timeout",
-            "safety": "video_err_safety",
-            "insufficient_funds": "video_err_unavailable",
-        }.get(exc.category, "video_failed")
-        await progress_msg.edit_text(get_string(err_key, lang))
-        if exc.category == "insufficient_funds":
-            await _notify_admins_video_error(db, bot, user_id, str(exc))
+        await _notify_admins_video_error(db, bot, user_id, f"[{exc.category}] {exc}")
+        await progress_msg.edit_text(get_string("api_error_user", lang), reply_markup=_user_error_retry_kb("video_menu"))
     except Exception as exc:
         logger.error("[VIDEO] unexpected error user=%s: %s", user_id, exc, exc_info=True)
-        await progress_msg.edit_text(get_string("video_failed", lang))
+        await _notify_admins_video_error(db, bot, user_id, f"{type(exc).__name__}: {exc}")
+        await progress_msg.edit_text(get_string("api_error_user", lang), reply_markup=_user_error_retry_kb("video_menu"))
     finally:
         await release_polza_key_slot(z_key)
         await state.clear()
