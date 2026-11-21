@@ -594,9 +594,26 @@ async def _polza_fetch_image_bytes(session: aiohttp.ClientSession, ref: str) -> 
         if comma == -1:
             return b""
         return base64.b64decode(ref[comma + 1:])
-    async with session.get(ref, timeout=aiohttp.ClientTimeout(total=120)) as r:
-        r.raise_for_status()
-        return await r.read()
+    # Скачивание результата с CDN Polza: короткие таймауты + повторы, чтобы не зависать на медленном соединении.
+    attempts = max(1, _env_int("POLZA_DOWNLOAD_RETRIES", 4))
+    per_try = max(10.0, _env_float("POLZA_DOWNLOAD_TIMEOUT_SECONDS", 40.0))
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        t0 = time.time()
+        try:
+            timeout = aiohttp.ClientTimeout(total=per_try, connect=10, sock_read=20)
+            async with session.get(ref, timeout=timeout) as r:
+                r.raise_for_status()
+                data = await r.read()
+            logger.info("[POLZA] result downloaded: %s bytes in %.1fs (attempt %s)", len(data), time.time() - t0, attempt)
+            return data
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("[POLZA] result download failed attempt %s/%s after %.1fs: %s: %s | url=%s",
+                           attempt, attempts, time.time() - t0, type(exc).__name__, exc, ref[:200])
+            if attempt < attempts:
+                await asyncio.sleep(1.0 * attempt)
+    raise Exception(f"polza_result_download_failed: {type(last_exc).__name__}: {last_exc}")
 
 
 def _build_polza_provider_preferences() -> dict | None:
@@ -760,6 +777,7 @@ async def _polza_image_request(
         status = str(data.get("status") or "")
         ref = _polza_extract_image_ref(data) if status == "completed" else None
         if ref:
+            logger.info("[POLZA] result ref: %s", ref[:120] if not ref.startswith("data:") else f"base64 ({len(ref)} chars)")
             break
         summary = _polza_no_image_summary(data)
         err_text = _polza_error_text(data)
