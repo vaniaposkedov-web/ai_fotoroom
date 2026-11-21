@@ -148,7 +148,7 @@ def _progress_bar_expected_wall_seconds() -> float:
 
 
 def _primary_image_model() -> str:
-    """Основная модель генерации для Zveno."""
+    """Основная модель генерации для Polza.ai."""
     return "gemini-nano-banana-2.1"
 
 
@@ -3784,7 +3784,7 @@ async def _do_generate_real(message_or_callback: Message | CallbackQuery, state:
             last_error_msg = ""
             result_path = None
             last_key_id = 0
-            last_key_preview = "zveno"
+            last_key_preview = "polza"
             last_model_used = "gemini-nano-banana-2.1"
 
             if not images_data:
@@ -3817,7 +3817,7 @@ async def _do_generate_real(message_or_callback: Message | CallbackQuery, state:
                             await db.increment_gcp_usage(used_project_id)
 
                         last_model_used = gen_meta.get("model_used", "unknown")
-                        last_key_preview = gen_meta.get("zveno_key_preview") or gen_meta.get("kie_key_preview") or "zveno"
+                        last_key_preview = gen_meta.get("polza_key_preview") or gen_meta.get("kie_key_preview") or "polza"
                         await db.subtract_user_balance(user_id, total_price)
                         from bot.keyboards import result_actions_keyboard, result_actions_own_keyboard
                         from aiogram.types import FSInputFile
@@ -3888,7 +3888,7 @@ async def _do_generate_real(message_or_callback: Message | CallbackQuery, state:
                 except asyncio.TimeoutError:
                     last_error_msg = "generation_timeout"
                 except Exception as e:
-                    last_key_preview = gen_meta.get("zveno_key_preview") or gen_meta.get("kie_key_preview") or last_key_preview
+                    last_key_preview = gen_meta.get("polza_key_preview") or gen_meta.get("kie_key_preview") or last_key_preview
                     last_model_used = gen_meta.get("model_used", target_model if 'target_model' in locals() else last_model_used)
                     last_error_msg = str(e)
         finally:
@@ -3925,11 +3925,11 @@ async def _do_generate_real(message_or_callback: Message | CallbackQuery, state:
                 if len(short_err) > 600:
                     short_err = short_err[:600] + "..."
                 provider_reason = ""
-                if "zveno_insufficient_credits" in short_err.lower() or "insufficient credits" in short_err.lower():
+                if "polza_insufficient_credits" in short_err.lower() or "insufficient credits" in short_err.lower():
                     provider_reason = "Provider status: insufficient credits (upstream billing)"
                 elif "image_generation_provider_location_unsupported" in short_err.lower() or "location is not supported" in short_err.lower():
                     provider_reason = "Provider status: Google AI Studio location unsupported"
-                elif "image_generation_empty_image" in short_err.lower() or "zveno_empty_image" in short_err.lower():
+                elif "image_generation_empty_image" in short_err.lower() or "polza_empty_image" in short_err.lower():
                     provider_reason = "Provider status: empty image response (200 OK without image)"
                 elif "image_generation_safety_blocked" in short_err.lower():
                     provider_reason = "Provider status: image safety/content filter"
@@ -3975,10 +3975,10 @@ async def _do_generate_real(message_or_callback: Message | CallbackQuery, state:
             else:
                 err_text = "⚠️ Временная сетевая ошибка сервиса генерации. Серверы сейчас под высокой нагрузкой. Попробуйте еще раз через 10-30 секунд."
             show_retry = True
-        elif "all_keys_busy" in msg_l or "kie_keys_busy" in msg_l or "zveno_keys_busy" in msg_l:
+        elif "all_keys_busy" in msg_l or "kie_keys_busy" in msg_l or "polza_keys_busy" in msg_l:
             err_text = "⚠️ Сейчас все ключи заняты активными запросами. Повторите через 10-20 секунд."
             show_retry = True
-        elif "zveno_insufficient_credits" in msg_l or "insufficient credits" in msg_l:
+        elif "polza_insufficient_credits" in msg_l or "insufficient credits" in msg_l:
             err_text = "⚠️ Сервис генерации временно недоступен. Мы уже получили уведомление и работаем над восстановлением. Попробуйте повторить чуть позже."
             show_retry = True
         elif "image_generation_provider_location_unsupported" in msg_l or "location is not supported" in msg_l:
@@ -3987,7 +3987,7 @@ async def _do_generate_real(message_or_callback: Message | CallbackQuery, state:
         elif "апскейл превысил" in msg_l or "upscale timeout" in msg_l:
             err_text = "⚠️ Изображение подготовлено в стандартном качестве, этап 4K занял слишком много времени. Попробуйте повторить позже."
             show_retry = True
-        elif "image_generation_empty_image" in msg_l or "zveno_empty_image" in msg_l or "empty_result" in msg_l:
+        elif "image_generation_empty_image" in msg_l or "polza_empty_image" in msg_l or "empty_result" in msg_l:
             err_text = "⚠️ Нейросеть вернула ответ без изображения. Попробуйте другой ракурс/промпт и повторите."
             show_retry = True
         elif "image_generation_failed_try_again" in msg_l:
@@ -4219,7 +4219,7 @@ async def on_result_edit_text_real(message: Message, state: FSMContext, db: Data
         last_error_msg = ""
         result_path = None
         kid_used = 0
-        key_preview_used = "zveno"
+        key_preview_used = "polza"
         model_used = "gemini-nano-banana-2.1"
         gen_meta: dict = {"category": category, "user_id": user_id}
 
@@ -4259,11 +4259,11 @@ async def on_result_edit_text_real(message: Message, state: FSMContext, db: Data
                     last_error_msg = "empty_result"
                 else:
                     model_used = gen_meta.get("model_used", "unknown")
-                    key_preview_used = gen_meta.get("zveno_key_preview") or gen_meta.get("kie_key_preview") or "zveno"
+                    key_preview_used = gen_meta.get("polza_key_preview") or gen_meta.get("kie_key_preview") or "polza"
             except asyncio.TimeoutError:
                 last_error_msg = "generation_timeout"
             except Exception as ex:
-                key_preview_used = gen_meta.get("zveno_key_preview") or gen_meta.get("kie_key_preview") or key_preview_used
+                key_preview_used = gen_meta.get("polza_key_preview") or gen_meta.get("kie_key_preview") or key_preview_used
                 model_used = gen_meta.get("model_used", model_used)
                 last_error_msg = str(ex)
 
@@ -4366,14 +4366,14 @@ async def on_result_edit_text_real(message: Message, state: FSMContext, db: Data
                 await message.answer(
                     "🔞 <b>Запрос отклонен нейросетью.</b> Сработал фильтр безопасности контента. Попробуйте загрузить менее откровенное фото или изменить промпт.",
                     parse_mode="HTML")
-            elif "all_keys_busy" in msg_l or "kie_keys_busy" in msg_l or "zveno_keys_busy" in msg_l:
+            elif "all_keys_busy" in msg_l or "kie_keys_busy" in msg_l or "polza_keys_busy" in msg_l:
                 await message.answer("⚠️ Сейчас все ключи заняты активными запросами. Попробуйте через 10-20 секунд.")
-            elif "zveno_insufficient_credits" in msg_l or "insufficient credits" in msg_l:
+            elif "polza_insufficient_credits" in msg_l or "insufficient credits" in msg_l:
                 await message.answer("⚠️ Сервис генерации временно недоступен. Мы уже получили уведомление и работаем над восстановлением. Попробуйте чуть позже.")
             elif "timeout" in msg_l or "таймаут" in msg_l:
                 await message.answer(
                     "⚠️ Генерация заняла слишком много времени. Серверы сейчас под высокой нагрузкой. Попробуйте еще раз через 20-60 секунд.")
-            elif "image_generation_empty_image" in msg_l or "zveno_empty_image" in msg_l or "empty_result" in msg_l:
+            elif "image_generation_empty_image" in msg_l or "polza_empty_image" in msg_l or "empty_result" in msg_l:
                 await message.answer("⚠️ Нейросеть вернула ответ без изображения. Попробуйте изменить текст правок.")
             else:
                 await message.answer(get_string("gen_error", lang))
@@ -4963,11 +4963,11 @@ async def _on_video_confirm_real(callback: CallbackQuery, state: FSMContext, db:
         except Exception:
             pass
 
-    from bot.gemini import acquire_zveno_key_slot, release_zveno_key_slot
+    from bot.gemini import acquire_polza_key_slot, release_polza_key_slot
     from bot.video_gen import generate_video, VideoError, VideoRateLimitError, VideoTimeoutError
     from bot.telegram_images import telegram_file_ids_to_bytes_list
 
-    z_key = await acquire_zveno_key_slot()
+    z_key = await acquire_polza_key_slot()
     if not z_key:
         await progress_msg.edit_text(get_string("video_err_no_keys", lang))
         return
@@ -5004,7 +5004,7 @@ async def _on_video_confirm_real(callback: CallbackQuery, state: FSMContext, db:
         cost = None
         if isinstance(job_data, dict) and isinstance(job_data.get("usage"), dict):
             cost = job_data["usage"].get("cost")
-        logger.info("[VIDEO] user=%s mode=%s dur=%ss aspect=%s price=%s zveno_cost=%s",
+        logger.info("[VIDEO] user=%s mode=%s dur=%ss aspect=%s price=%s polza_cost=%s",
                     user_id, video_mode, duration, aspect_ratio, price, cost)
 
         video_pid = f"VID{user_id}_{int(time.time())}"
@@ -5025,7 +5025,7 @@ async def _on_video_confirm_real(callback: CallbackQuery, state: FSMContext, db:
                 category=f"video_{video_mode}",
                 params=json.dumps({"mode": video_mode, "duration": duration,
                                    "aspect_ratio": aspect_ratio, "price": price,
-                                   "zveno_cost": cost}),
+                                   "polza_cost": cost}),
                 input_photos=json.dumps([data.get("video_photo_id", "")]),
                 result_photo_id="",
                 input_paths="",
@@ -5053,5 +5053,5 @@ async def _on_video_confirm_real(callback: CallbackQuery, state: FSMContext, db:
         logger.error("[VIDEO] unexpected error user=%s: %s", user_id, exc, exc_info=True)
         await progress_msg.edit_text(get_string("video_failed", lang))
     finally:
-        await release_zveno_key_slot(z_key)
+        await release_polza_key_slot(z_key)
         await state.clear()

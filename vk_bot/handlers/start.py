@@ -1500,15 +1500,15 @@ def _render_generation_error(lang: str, err: Exception) -> tuple[str, bool]:
         if use_proxy:
             return "⚠️ Временная сетевая ошибка сервиса генерации. Серверы сейчас под высокой нагрузкой. Попробуйте еще раз через 20-60 секунд.", True
         return "⚠️ Временная сетевая ошибка сервиса генерации. Серверы сейчас под высокой нагрузкой. Попробуйте еще раз через 10-30 секунд.", True
-    if "all_keys_busy" in low or "kie_keys_busy" in low or "zveno_keys_busy" in low:
+    if "all_keys_busy" in low or "kie_keys_busy" in low or "polza_keys_busy" in low:
         return "⚠️ Сейчас все ключи заняты активными запросами. Повторите через 10-20 секунд.", True
-    if "zveno_insufficient_credits" in low or "insufficient credits" in low:
+    if "polza_insufficient_credits" in low or "insufficient credits" in low:
         return "⚠️ Сервис генерации временно недоступен. Мы уже получили уведомление и работаем над восстановлением. Попробуйте повторить чуть позже.", True
     if "image_generation_provider_location_unsupported" in low or "location is not supported" in low:
         return "⚠️ Сервис генерации временно недоступен на стороне провайдера. Мы уже получили уведомление. Попробуйте повторить чуть позже.", True
     if "апскейл превысил" in low or "upscale timeout" in low:
         return "⚠️ Изображение подготовлено в стандартном качестве, этап 4K занял слишком много времени. Попробуйте повторить позже.", True
-    if "image_generation_empty_image" in low or "zveno_empty_image" in low or "empty_result" in low:
+    if "image_generation_empty_image" in low or "polza_empty_image" in low or "empty_result" in low:
         return "⚠️ Нейросеть вернула ответ без изображения. Попробуйте другой ракурс/промпт и повторите.", True
     if "image_generation_failed_try_again" in low:
         return ("⚠️ Не удалось завершить генерацию в этот раз. Попробуйте еще раз. "
@@ -1562,7 +1562,7 @@ async def _handle_generation_error(
     provider_reason = ""
     if "image_generation_provider_location_unsupported" in low_err or "location is not supported" in low_err:
         provider_reason = "Provider status: Google AI Studio location unsupported\n"
-    elif "image_generation_empty_image" in low_err or "zveno_empty_image" in low_err:
+    elif "image_generation_empty_image" in low_err or "polza_empty_image" in low_err:
         provider_reason = "Provider status: empty image response (200 OK without image)\n"
     elif "image_generation_safety_blocked" in low_err or "safety" in low_err:
         provider_reason = "Provider status: image safety/content filter\n"
@@ -2058,6 +2058,8 @@ async def _vk_ensure_api_keys_schema(conn: aiosqlite.Connection) -> None:
         "disabled_until": "TIMESTAMP",
         "created_at": "TIMESTAMP",
         "updated_at": "TIMESTAMP",
+        # Ключи до перехода на Polza.ai помечаются 'zveno' и не используются.
+        "provider": "TEXT NOT NULL DEFAULT 'zveno'",
     }
     for col, decl in additions.items():
         if col not in cols:
@@ -2099,6 +2101,7 @@ async def _vk_list_api_keys(db: Database) -> list[tuple]:
             """
             SELECT id, token, is_active, usage_count, error_count, daily_usage, daily_limit, priority
             FROM api_keys
+            WHERE provider='polza'
             ORDER BY is_active DESC, priority DESC, id ASC
             """
         ) as cur:
@@ -2106,7 +2109,7 @@ async def _vk_list_api_keys(db: Database) -> list[tuple]:
     if rows:
         return rows
     env_key = (
-        os.getenv("ZVENO_API_KEY")
+        os.getenv("POLZA_API_KEY")
         or os.getenv("KIE_API_KEY")
         or os.getenv("GEMINI_API_KEY")
         or ""
@@ -2154,8 +2157,8 @@ async def _pick_api_key(db: Database) -> tuple[int | None, str | None, asyncio.L
         last_used_key_id = None
     active_rows = order_keys_after_last_used(active_rows, last_used_key_id)
 
-    # Конкуренцию на ключ держит сам generate_image() через слоты Zveno
-    # (ZVENO_MAX_CONCURRENT_PER_KEY=20). Прежний строгий per-key lock с ожиданием
+    # Конкуренцию на ключ держит сам generate_image() через слоты Polza
+    # (POLZA_MAX_CONCURRENT_PER_KEY=20). Прежний строгий per-key lock с ожиданием
     # 6с при единственном ключе выдавал ложное "Все API ключи исчерпали лимиты"
     # на любом параллельном запросе. Берём активный ключ без эксклюзивного лока.
     row = active_rows[0]

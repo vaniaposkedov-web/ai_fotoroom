@@ -63,6 +63,38 @@ async def run_migrations(db: aiosqlite.Connection):
         """
     )
     await db.commit()
+    # Polza.ai: отдельный журнал расходов + пометка провайдера у ключей.
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS polza_usage_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            user_id INTEGER,
+            key_id INTEGER,
+            key_preview TEXT,
+            model TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'ok',
+            prompt_tokens INTEGER NOT NULL DEFAULT 0,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            input_rub REAL NOT NULL DEFAULT 0,
+            output_rub REAL NOT NULL DEFAULT 0,
+            total_rub REAL NOT NULL DEFAULT 0,
+            latency_ms INTEGER NOT NULL DEFAULT 0,
+            error_text TEXT
+        );
+        """
+    )
+    await db.commit()
+    try:
+        async with db.execute("PRAGMA table_info(api_keys)") as cur:
+            _ak_cols = {str(r[1]) for r in await cur.fetchall()}
+        if _ak_cols and "provider" not in _ak_cols:
+            # Все ключи, добавленные до перехода, — от Zveno: в ротацию Polza они не попадут.
+            await db.execute("ALTER TABLE api_keys ADD COLUMN provider TEXT NOT NULL DEFAULT 'zveno'")
+            await db.commit()
+    except Exception as e:
+        print(f"Migration error (api_keys.provider): {e}")
 
     
     async with db.execute("PRAGMA table_info(subscriptions)") as cur:
@@ -2938,18 +2970,18 @@ async def index(request: Request, db: aiosqlite.Connection = Depends(get_db), us
         except Exception:
             pass
 
-        # Total Zveno API calls (all time)
-        total_zveno_calls = 0
+        # Total Polza API calls (all time)
+        total_polza_calls = 0
         try:
-            async with db.execute("SELECT COUNT(*) FROM zveno_usage_log WHERE status='ok'") as cur:
-                total_zveno_calls = (await cur.fetchone())[0]
+            async with db.execute("SELECT COUNT(*) FROM polza_usage_log WHERE status='ok'") as cur:
+                total_polza_calls = (await cur.fetchone())[0]
         except Exception:
             pass
 
     except Exception as e:
         print(f"Stats error: {e}")
         total_users = today_users = today_gens = total_balance = 0
-        today_1k = today_4k = total_zveno_calls = 0
+        today_1k = today_4k = total_polza_calls = 0
 
     maintenance = False
     try:
@@ -3002,7 +3034,7 @@ async def index(request: Request, db: aiosqlite.Connection = Depends(get_db), us
         "today_gens": today_gens, "total_balance": total_balance,
         "today_video_gens": today_video_gens, "total_video_gens": total_video_gens,
         "today_1k": today_1k, "today_4k": today_4k,
-        "total_zveno_calls": total_zveno_calls,
+        "total_polza_calls": total_polza_calls,
         "maintenance": maintenance, "disable_4k": disable_4k, "proxy_status": proxy_status,
         "recent_errors": recent_errors, "proxy_errors_count": proxy_errors_count
     })
@@ -3457,11 +3489,15 @@ async def _compute_metrics(db: aiosqlite.Connection):
             revenue_map[row[0]] = row[1] or 0
             recharge_cnt_map[row[0]] = row[2] or 0
 
-    # 4. API cost per month (from zveno_usage_log)
+    # 4. API cost per month (история Zveno + Polza.ai)
     q_api = """
         SELECT strftime('%Y-%m', datetime(created_at, '+3 hours')) AS m,
                SUM(total_rub) AS cost
-        FROM zveno_usage_log
+        FROM (
+            SELECT created_at, total_rub FROM zveno_usage_log
+            UNION ALL
+            SELECT created_at, total_rub FROM polza_usage_log
+        )
         GROUP BY m
     """
     api_cost_map = {}
@@ -4275,16 +4311,7 @@ async def list_keys(request: Request, db: aiosqlite.Connection = Depends(get_db)
             "last_check": r[7],
         })
 
-    try:
-        async with db.execute("PRAGMA table_info(zveno_usage_log)") as cur:
-            zveno_cols = await cur.fetchall()
-        zveno_col_names = {str(r[1]) for r in (zveno_cols or [])}
-        if "user_id" not in zveno_col_names:
-            await db.execute("ALTER TABLE zveno_usage_log ADD COLUMN user_id INTEGER")
-            await db.commit()
-    except Exception:
-        pass
-
+    usage_row = (0, 0, 0, 0.0, 0.0, 0.0, 0)
     try:
         async with db.execute(
             """
@@ -4296,13 +4323,13 @@ async def list_keys(request: Request, db: aiosqlite.Connection = Depends(get_db)
                 COALESCE(SUM(output_rub), 0.0),
                 COALESCE(SUM(total_rub), 0.0),
                 COUNT(*)
-            FROM zveno_usage_log
+            FROM polza_usage_log
             WHERE status='ok'
             """
         ) as cur:
-            usage_row = await cur.fetchone()
+            usage_row = await cur.fetchone() or usage_row
     except Exception:
-        usage_row = (0, 0, 0, 0.0, 0.0, 0.0, 0)
+        pass
 
     try:
         async with db.execute(
@@ -4314,77 +4341,74 @@ async def list_keys(request: Request, db: aiosqlite.Connection = Depends(get_db)
                 COALESCE(model, ''),
                 COALESCE(status, ''),
                 COALESCE(error_text, '')
-            FROM zveno_usage_log
+            FROM polza_usage_log
             WHERE status != 'ok'
             ORDER BY id DESC
             LIMIT 80
             """
         ) as cur:
-            zveno_error_rows = await cur.fetchall()
+            polza_error_rows = await cur.fetchall()
     except Exception:
-        zveno_error_rows = []
+        polza_error_rows = []
 
-    try:
-        async with db.execute(
-            "SELECT key, value FROM app_settings WHERE key IN ('zveno_total_balance_rub', 'zveno_note')"
-        ) as cur:
-            settings_rows = await cur.fetchall()
-        settings_map = {str(r[0]): str(r[1]) for r in settings_rows}
-    except Exception:
-        settings_map = {}
+    # Реальный баланс аккаунта Polza.ai (GET /api/v2/balance) по первому активному ключу.
+    polza_balance = None
+    polza_balance_error = ""
+    active_polza = [k for k in gemini_keys if _row_get(k, "provider", "zveno") == "polza" and k["is_active"]]
+    if active_polza:
+        polza_balance, polza_balance_error = await _fetch_polza_balance(active_polza[0]["token"])
 
-    total_balance_rub_raw = settings_map.get("zveno_total_balance_rub", "0")
-    try:
-        total_balance_rub = float(total_balance_rub_raw)
-    except Exception:
-        total_balance_rub = 0.0
-    spent_rub = float(usage_row[5] or 0.0)
-    remaining_rub = max(0.0, total_balance_rub - spent_rub)
-    zveno_note = settings_map.get("zveno_note", "")
-
-    flat_rate = float(os.environ.get("ZVENO_FLAT_RATE_PER_CALL_RUB", "6.3"))
     return templates.TemplateResponse("api_keys.html", {
         "request": request,
         "gemini_keys": gemini_keys,
         "key_proxy_lists": key_proxy_lists,
-        "zveno_usage": {
+        "polza_usage": {
             "prompt_tokens": int(usage_row[0] or 0),
             "completion_tokens": int(usage_row[1] or 0),
             "total_tokens": int(usage_row[2] or 0),
-            "input_rub": float(usage_row[3] or 0.0),
-            "output_rub": float(usage_row[4] or 0.0),
-            "spent_rub": spent_rub,
+            "spent_rub": float(usage_row[5] or 0.0),
             "request_count": int(usage_row[6] or 0),
-            "total_balance_rub": total_balance_rub,
-            "remaining_rub": remaining_rub,
-            "note": zveno_note,
-            "flat_rate": flat_rate,
         },
-        "zveno_error_rows": zveno_error_rows,
+        "polza_balance": polza_balance,
+        "polza_balance_error": polza_balance_error,
+        "polza_error_rows": polza_error_rows,
     })
 
 
-@app.post("/api_keys/zveno_budget")
-async def update_zveno_budget(
-    total_balance_rub: str = Form("0"),
-    note: str = Form(""),
-    db: aiosqlite.Connection = Depends(get_db),
-    user: str = Depends(get_current_username),
-):
+def _row_get(row, key: str, default=None):
     try:
-        total_value = max(0.0, float((total_balance_rub or "0").replace(",", ".")))
-    except Exception:
-        total_value = 0.0
-    await db.execute(
-        "INSERT INTO app_settings (key, value) VALUES ('zveno_total_balance_rub', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (f"{total_value:.2f}",),
-    )
-    await db.execute(
-        "INSERT INTO app_settings (key, value) VALUES ('zveno_note', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        ((note or "").strip()[:300],),
-    )
-    await db.commit()
-    return RedirectResponse(url="/api_keys", status_code=303)
+        val = row[key]
+    except (IndexError, KeyError):
+        return default
+    return default if val is None else val
+
+
+async def _fetch_polza_balance(token: str) -> tuple[dict | None, str]:
+    base = (os.environ.get("POLZA_BASE_URL") or "https://polza.ai/api/v1").strip().rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"{base}/v2/balance", headers={"Authorization": f"Bearer {token}"})
+        if resp.status_code != 200:
+            return None, f"HTTP {resp.status_code}: {resp.text[:200]}"
+        data = resp.json()
+
+        def _num(v):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        return {
+            "amount": _num(data.get("amount")),
+            "available": _num(data.get("available")),
+            "reserved": _num(data.get("reservedAmount")),
+            "spent": _num(data.get("spentAmount")),
+            "updated_at": str(data.get("updatedAt") or ""),
+        }, ""
+    except Exception as e:
+        return None, str(e)[:200]
 
 
 @app.post("/api_keys/{key_id}/proxies")
@@ -4430,9 +4454,16 @@ async def add_key(token: str = Form(...), db: aiosqlite.Connection = Depends(get
     token = new_token
 
     import re
-    token = re.sub(r'[^A-Za-z0-9_\-]', '', token)
-    
-    await db.execute("INSERT INTO api_keys (token) VALUES (?)", (token,))
+    token = re.sub(r'[^A-Za-z0-9_\-.]', '', token)
+    if not token:
+        return RedirectResponse(url="/api_keys", status_code=303)
+
+    async with db.execute("SELECT id FROM api_keys WHERE token=?", (token,)) as cur:
+        existing = await cur.fetchone()
+    if existing:
+        await db.execute("UPDATE api_keys SET provider='polza', is_active=1 WHERE id=?", (existing[0],))
+    else:
+        await db.execute("INSERT INTO api_keys (token, provider) VALUES (?, 'polza')", (token,))
     await db.commit()
     return RedirectResponse(url="/api_keys", status_code=303)
 

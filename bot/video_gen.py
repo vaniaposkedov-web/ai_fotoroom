@@ -1,4 +1,4 @@
-"""Video Generation client."""
+"""Video Generation client (Polza.ai Media API)."""
 from __future__ import annotations
 
 import asyncio
@@ -71,16 +71,44 @@ def _is_retryable_video_failure(err_str: str) -> bool:
         "internal", "500", "502", "503", "504", "unavailable", "try again", "failed",
     ))
 
-ZVENO_BASE_URL = (os.getenv("ZVENO_BASE_URL") or "https://api.zveno.ai").rstrip("/")
-# The video endpoints below always append "/v1/...". If ZVENO_BASE_URL already ends
-# with "/v1" (as it does in some envs), strip it so we never build ".../v1/v1/videos" (404).
-if ZVENO_BASE_URL.endswith("/v1"):
-    ZVENO_BASE_URL = ZVENO_BASE_URL[:-3]
-VIDEO_MODEL = os.getenv("ZVENO_VIDEO_MODEL", "kwaivgI/kling-2.1-standard")
-VIDEO_RESOLUTION = os.getenv("ZVENO_VIDEO_RESOLUTION", "720p")
-VIDEO_POLL_INTERVAL = float(os.getenv("ZVENO_VIDEO_POLL_INTERVAL", "8"))
-VIDEO_POLL_TIMEOUT = float(os.getenv("ZVENO_VIDEO_POLL_TIMEOUT", "600"))
+# Polza.ai Media API: POST /v1/media (async) -> GET /v1/media/{id} -> data.url (MP4 на CDN, 7 дней).
+VIDEO_MODEL = (os.getenv("POLZA_VIDEO_MODEL") or "grok-imagine-video-1-5").strip()
+VIDEO_RESOLUTION = os.getenv("POLZA_VIDEO_RESOLUTION", "720p")
+VIDEO_POLL_INTERVAL = float(os.getenv("POLZA_VIDEO_POLL_INTERVAL", "8"))
+VIDEO_POLL_TIMEOUT = float(os.getenv("POLZA_VIDEO_POLL_TIMEOUT", "600"))
 VIDEO_MAX_PROMPT_LEN = 2500
+
+
+def _polza_base_url() -> str:
+    from bot.gemini import polza_base_url
+    return polza_base_url()
+
+
+def _error_message(body: dict, fallback: str = "") -> str:
+    err = body.get("error") if isinstance(body, dict) else None
+    if isinstance(err, dict):
+        parts = [str(err.get("code") or ""), str(err.get("message") or "")]
+        meta = err.get("metadata")
+        if isinstance(meta, dict) and meta.get("raw"):
+            parts.append(str(meta.get("raw")))
+        msg = " ".join(p for p in parts if p).strip()
+        if msg:
+            return msg
+    if err:
+        return str(err)
+    return fallback
+
+
+# Форматы, которые модель принимает в aspect_ratio (Grok Imagine Video 1.5: 1:1, 16:9, 9:16, 3:2, 2:3, auto).
+# Для остальных (напр. 3:4) входной кадр уже обрезан под формат, а в API уходит "auto" —
+# модель берёт пропорции из кадра.
+VIDEO_API_ASPECTS = set(
+    a.strip() for a in (os.getenv("POLZA_VIDEO_ASPECTS") or "1:1,16:9,9:16,3:2,2:3").split(",") if a.strip()
+)
+
+
+def _api_aspect_ratio(aspect_ratio: str) -> str:
+    return aspect_ratio if aspect_ratio in VIDEO_API_ASPECTS else "auto"
 
 
 async def submit_video_job(
@@ -90,39 +118,38 @@ async def submit_video_job(
     frame_images: list[dict] | None = None,
     aspect_ratio: str = "9:16",
 ) -> dict:
-    """POST /v1/videos — submit async video generation job.
-
-    Returns raw JSON response with keys: id, polling_url, status.
-    """
-    endpoint = f"{ZVENO_BASE_URL}/v1/videos"
+    """POST /v1/media — submit async video generation job. Returns {id, status, ...}."""
+    endpoint = f"{_polza_base_url()}/media"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
-    payload: dict = {
-        "model": VIDEO_MODEL,
-        "prompt": prompt,
-        "duration": duration,
+    media_input: dict = {
+        "prompt": prompt[:VIDEO_MAX_PROMPT_LEN] if prompt else "",
+        "duration": str(int(duration)),
         "resolution": VIDEO_RESOLUTION,
-        "aspect_ratio": aspect_ratio,
+        "aspect_ratio": _api_aspect_ratio(aspect_ratio),
     }
     if frame_images:
-        payload["frame_images"] = frame_images
+        media_input["images"] = frame_images
+    payload = {"model": VIDEO_MODEL, "input": media_input, "async": True}
 
     logger.info("[VIDEO] submit model=%s duration=%ss resolution=%s aspect=%s frames=%s prompt_len=%d prompt_preview=%.100s",
                 VIDEO_MODEL, duration, VIDEO_RESOLUTION, aspect_ratio,
-                len(frame_images or []), len(prompt), repr(prompt[:100]))
+                len(frame_images or []), len(prompt or ""), repr((prompt or "")[:100]))
 
-    timeout = aiohttp.ClientTimeout(total=60)
+    timeout = aiohttp.ClientTimeout(total=90)
     max_retries = 3
     for attempt in range(1, max_retries + 1):
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(endpoint, headers=headers, json=payload) as resp:
-                body = await resp.json()
+                try:
+                    body = await resp.json(content_type=None)
+                except Exception:
+                    body = {"error": (await resp.text())[:500]}
                 if resp.status in (200, 201, 202):
                     logger.info("[VIDEO] job submitted: id=%s status=%s", body.get("id"), body.get("status"))
                     return body
 
-                err = body.get("error", {})
-                msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+                msg = _error_message(body, f"HTTP {resp.status}")
                 logger.error("[VIDEO] submit failed HTTP %s (attempt %s/%s): %s",
                              resp.status, attempt, max_retries, msg)
 
@@ -134,17 +161,19 @@ async def submit_video_job(
 
                 if resp.status == 429:
                     raise VideoRateLimitError(msg)
-                if resp.status == 402 or "insufficient funds" in msg.lower() or "insufficient credits" in msg.lower():
+                low = msg.lower()
+                if resp.status == 402 or "insufficient" in low:
                     raise VideoBillingError(msg)
-                raise VideoSubmitError(msg)
+                raise VideoSubmitError(f"HTTP {resp.status}: {msg}")
+    raise VideoSubmitError("video_submit_failed")
 
 
 async def poll_video_job(api_key: str, job_id: str, on_progress=None) -> dict:
-    """Poll GET /v1/videos/{id} until terminal status (completed / failed).
+    """Poll GET /v1/media/{id} until terminal status (completed / failed / cancelled).
 
     on_progress(elapsed_sec, status) — optional async callback for progress updates.
     """
-    endpoint = f"{ZVENO_BASE_URL}/v1/videos/{job_id}"
+    endpoint = f"{_polza_base_url()}/media/{job_id}"
     headers = {"Authorization": f"Bearer {api_key}"}
     timeout = aiohttp.ClientTimeout(total=30)
 
@@ -157,12 +186,12 @@ async def poll_video_job(api_key: str, job_id: str, on_progress=None) -> dict:
         while time.time() < deadline:
             try:
                 async with session.get(endpoint, headers=headers) as resp:
-                    body = await resp.json()
+                    body = await resp.json(content_type=None)
                     status = body.get("status", "unknown")
                     if status != last_status:
                         logger.info("[VIDEO] poll id=%s status=%s", job_id, status)
                         last_status = status
-                    if status in ("completed", "failed"):
+                    if status in ("completed", "failed", "cancelled"):
                         return body
             except Exception as exc:
                 logger.warning("[VIDEO] poll error for %s: %s", job_id, exc)
@@ -179,21 +208,32 @@ async def poll_video_job(api_key: str, job_id: str, on_progress=None) -> dict:
     raise VideoTimeoutError("video_poll_timeout")
 
 
-async def download_video(api_key: str, job_id: str, save_path: str) -> str:
-    """GET /v1/videos/{id}/content — download MP4 to save_path."""
-    endpoint = f"{ZVENO_BASE_URL}/v1/videos/{job_id}/content"
-    headers = {"Authorization": f"Bearer {api_key}"}
-    timeout = aiohttp.ClientTimeout(total=120)
+def _video_url_from_result(job_data: dict) -> str | None:
+    for key in ("data", "output"):
+        block = job_data.get(key)
+        items = block if isinstance(block, list) else [block]
+        for item in items:
+            if isinstance(item, dict) and isinstance(item.get("url"), str) and item["url"]:
+                return item["url"]
+    return None
+
+
+async def download_video(api_key: str, job_data: dict, save_path: str) -> str:
+    """Скачивает MP4 по data.url из результата Polza."""
+    url = _video_url_from_result(job_data)
+    if not url:
+        raise Exception(f"video_download_failed: no url in result {str(job_data)[:300]}")
+    timeout = aiohttp.ClientTimeout(total=180)
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(endpoint, headers=headers) as resp:
+        async with session.get(url) as resp:
             if resp.status != 200:
                 text = await resp.text()
                 raise Exception(f"video_download_failed: HTTP {resp.status} {text[:300]}")
             with open(save_path, "wb") as f:
                 async for chunk in resp.content.iter_chunked(1 << 20):
                     f.write(chunk)
-    logger.info("[VIDEO] downloaded %s -> %s", job_id, save_path)
+    logger.info("[VIDEO] downloaded %s -> %s", job_data.get("id"), save_path)
     return save_path
 
 
@@ -269,28 +309,17 @@ def build_frame_images_from_bytes(
     images: list[bytes],
     labels: list[str] | None = None,
 ) -> list[dict]:
-    """Build frame_images payload for Zveno Video API from raw image bytes.
+    """Build Polza `images` payload (MediaFileDto) from raw image bytes.
 
-    labels: list of frame_type values, e.g. ["first_frame", "last_frame"].
-    If None, defaults to ["first_frame"] for 1 image or ["first_frame", "last_frame"] for 2.
+    Порядок важен: первое изображение — стартовый кадр (image-to-video).
+    labels оставлен для совместимости вызовов и не передаётся в API.
     """
-    if not labels:
-        if len(images) == 1:
-            labels = ["first_frame"]
-        else:
-            labels = ["first_frame", "last_frame"]
-
     result = []
-    for i, img_bytes in enumerate(images):
-        if i >= len(labels):
-            break
+    limit = len(labels) if labels else len(images)
+    for img_bytes in images[:limit]:
         resized = _resize_image_bytes(img_bytes)
         b64 = base64.b64encode(resized).decode("ascii")
-        result.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-            "frame_type": labels[i],
-        })
+        result.append({"type": "base64", "data": f"data:image/jpeg;base64,{b64}"})
     return result
 
 
@@ -320,8 +349,7 @@ async def generate_video(
         if status == "completed":
             break
 
-        err = result.get("error", "unknown error")
-        err_str = str(err)
+        err_str = _error_message(result, "unknown error")
         if attempt < max_retries_on_429 and _is_retryable_video_failure(err_str):
             wait = 10 * attempt
             logger.warning("[VIDEO] job %s failed (%.160s), retrying in %ss (attempt %s/%s)...",
@@ -333,5 +361,5 @@ async def generate_video(
 
     os.makedirs("/tmp/video_gen", exist_ok=True)
     save_path = f"/tmp/video_gen/{job_id}.mp4"
-    await download_video(api_key, job_id, save_path)
+    await download_video(api_key, result, save_path)
     return save_path, result
